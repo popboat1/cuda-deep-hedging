@@ -12,11 +12,13 @@ struct SimulationParams {
     float sigma;       // volatility
     float T;           // time to expiry (years)
     float dt;          // T / num_steps
+    float K;           // strike price e.g., 100.0
 };
 
 // host interface that wraps around kernel launch in simulation.cu
 void generate_gbm_paths( 
     float* d_paths,                    // pre-allocated device buffer [num_paths x num_steps]
+    float* d_payoffs,
     const SimulationParams& params,
     unsigned long long seed = 1234ULL
 );

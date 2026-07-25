@@ -36,7 +36,18 @@ __global__ void gbm_path_kernel(curandState* states, float* d_paths, SimulationP
     states[path_idx] = local_state;
 }
 
-void generate_gbm_paths(float* d_paths, const SimulationParams& params, unsigned long long seed) {
+__global__ void compute_payoffs(float* d_paths, float* d_payoffs, SimulationParams params){
+    int path_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (path_idx >= params.num_paths) return;
+
+    int final_step_idx = (path_idx * params.num_steps) + (params.num_steps - 1);
+
+    float S_T = d_paths[final_step_idx];
+
+    d_payoffs[path_idx] = fmaxf(S_T - params.K, 0);
+}
+
+void generate_gbm_paths(float* d_paths, float* d_payoffs, const SimulationParams& params, unsigned long long seed) {
     int threads = 256;
     int blocks = cuda_utils::ceil_div(params.num_paths, threads);
 
@@ -49,5 +60,9 @@ void generate_gbm_paths(float* d_paths, const SimulationParams& params, unsigned
 
     // GBM generator
     gbm_path_kernel<<<blocks, threads>>>(d_rng_states.get(), d_paths, params);
+    CUDA_CHECK_KERNEL();
+
+    // compute payoffs
+    compute_payoffs<<<blocks, threads>>>(d_paths, d_payoffs, params);
     CUDA_CHECK_KERNEL();
 }

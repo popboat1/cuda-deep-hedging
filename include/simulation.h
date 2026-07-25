@@ -19,6 +19,7 @@ struct SimulationParams {
 void generate_gbm_paths( 
     float* d_paths,                    // pre-allocated device buffer [num_paths x num_steps]
     float* d_payoffs,
+    float* d_deltas,
     const SimulationParams& params,
     unsigned long long seed = 1234ULL
 );

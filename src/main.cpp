@@ -22,9 +22,10 @@ int main() {
         size_t total_elements = params.num_paths * params.num_steps;
         auto d_paths = cuda_utils::make_device_buffer<float>(total_elements);
         auto d_payoffs = cuda_utils::make_device_buffer<float>(params.num_paths);
+        auto d_deltas = cuda_utils::make_device_buffer<float>(params.num_paths * params.num_steps);
 
         std::cout << "launching generator..." << std::endl;
-        generate_gbm_paths(d_paths.get(), d_payoffs.get(), params);
+        generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params);
 
         std::cout << "validating on cpu..." << std::endl;
 
@@ -41,6 +42,14 @@ int main() {
             h_payoffs.data(),
             d_payoffs.get(),
             params.num_paths * sizeof(float),
+            cudaMemcpyDeviceToHost
+        ));
+
+        std::vector<float> h_deltas(params.num_paths * params.num_steps);
+        CUDA_CHECK(cudaMemcpy(
+            h_deltas.data(),
+            d_deltas.get(),
+            params.num_paths * params.num_steps * sizeof(float),
             cudaMemcpyDeviceToHost
         ));
 
@@ -63,6 +72,14 @@ int main() {
 
         std::cout << "simulated  mean S_T: " << simulated_mean_ST << std::endl;
         std::cout << "theoretical mean S_T: " << theoretical_mean_ST << std::endl;
+
+        // validate delta at t = 0
+        std::cout << "initial black-scholes delta (t=0): " << h_deltas[0] << std::endl;
+
+        // validate terminal delta at t = N-1 for path 0
+        int path0_terminal_idx = (0 * params.num_steps) + (params.num_steps - 1);
+        std::cout << "path 0 terminal price: " << h_paths[path0_terminal_idx] << std::endl;
+        std::cout << "path 0 terminal delta: " << h_deltas[path0_terminal_idx] << std::endl;
 
         std::cout << "done!" << std::endl;
 

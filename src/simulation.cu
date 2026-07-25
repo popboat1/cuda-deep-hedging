@@ -1,7 +1,7 @@
 #include "simulation.h"
 #include <curand_kernel.h>
 
-__global__ void setup_curand_kernel(curandState* states, unsigned long seed, int num_paths) {
+__global__ void setup_curand_kernel(curandState* states, unsigned long long seed, int num_paths) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(idx < num_paths) {
         curand_init(seed, idx, 0, &states[idx]);
@@ -12,7 +12,28 @@ __global__ void gbm_path_kernel(curandState* states, float* d_paths, SimulationP
     int path_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(path_idx >= params.num_paths) return;
 
-    // TODO: Implement Geometric Brownian Motion loop
+    // get RNG state from VRAM
+    curandState local_state = states[path_idx];
+
+    // pre-compute some constants
+    float sigma_sq = params.sigma * params.sigma;
+    float drift = (params.r - 0.5f * sigma_sq) * params.dt;
+    float vol = params.sigma * sqrtf(params.dt);
+    
+    float curr_S = params.S0;
+    
+    int path_offset = path_idx * params.num_steps;
+    
+    for(int t = 0; t < params.num_steps; ++t){
+        // write curr price to VRAM at step t
+        d_paths[path_offset + t] = curr_S;
+        // draw normal gaussian random noise
+        float Z = curand_normal(&local_state);
+        // advance stock price to t + 1
+        curr_S *= expf(drift + vol * Z);
+    }
+
+    states[path_idx] = local_state;
 }
 
 void generate_gbm_paths(float* d_paths, const SimulationParams& params, unsigned long long seed) {

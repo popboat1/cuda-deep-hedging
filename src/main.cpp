@@ -1,4 +1,7 @@
 #include <iostream>
+#include <vector>
+#include <cmath>
+#include <numeric>
 #include "simulation.h"
 
 int main() {
@@ -21,6 +24,28 @@ int main() {
         std::cout << "launching generator..." << std::endl;
         generate_gbm_paths(d_paths.get(), params);
 
+        std::cout << "validating on cpu..." << std::endl;
+
+        std::vector<float> h_paths(total_elements);
+        CUDA_CHECK(cudaMemcpy(
+            h_paths.data(),
+            d_paths.get(),
+            total_elements * sizeof(float),
+            cudaMemcpyDeviceToHost
+        ));
+
+        double sum_ST = 0.0;
+        for (int i = 0; i < params.num_paths; ++i) {
+            int final_step_idx = (i * params.num_steps) + (params.num_steps - 1);
+            sum_ST += h_paths[final_step_idx];
+        }
+
+        double simulated_mean_ST = sum_ST / params.num_paths;
+        double theoretical_mean_ST = params.S0 * std::exp(params.r * params.T);
+
+        std::cout << "simulated  mean S_T: " << simulated_mean_ST << std::endl;
+        std::cout << "theoretical mean S_T: " << theoretical_mean_ST << std::endl;
+
         std::cout << "done!" << std::endl;
 
     } catch (const std::exception& e) {
@@ -29,4 +54,4 @@ int main() {
     }
 
     return 0;
-}
+} 

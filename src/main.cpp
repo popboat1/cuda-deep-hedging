@@ -8,6 +8,7 @@
 #include "portfolio.h"
 #include "autograd.h"
 #include "optimizer.h"
+#include "exporter.h"
 
 int main() {
     try {
@@ -176,15 +177,16 @@ int main() {
             adam_step(weights, grads, adam_state, adam_params);
             adam_params.time_step++;
 
-            CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
-            double sum_sq_error = 0.0;
-            for (float v : h_portfolio_values) sum_sq_error += (v * v);
-            double policy_mse_loss = sum_sq_error / params.num_paths;
-            
             if(epoch % 10 == 0){
+                CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+                double sum_sq_error = 0.0;
+                for (float v : h_portfolio_values) sum_sq_error += (v * v);
+                double policy_mse_loss = sum_sq_error / params.num_paths;
                 std::cout << "epoch [" << epoch << "/" << num_epochs << "] MSE loss: " << policy_mse_loss << std::endl;
             }
         }
+
+        export_hedging_surface("hedging_surface.csv", weights, params);
 
         std::cout << "done!" << std::endl;
 

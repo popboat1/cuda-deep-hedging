@@ -6,6 +6,8 @@
 #include "simulation.h"
 #include "mlp.h"
 #include "portfolio.h"
+#include "autograd.h"
+#include "optimizer.h"
 
 int main() {
     try {
@@ -25,7 +27,7 @@ int main() {
 
         std::cout << "allocating vram for " << params.num_paths << " paths..." << std::endl;
         
-        // allocate buffer
+        // simulations buffer
         size_t total_elements = params.num_paths * params.num_steps;
         auto d_paths = cuda_utils::make_device_buffer<float>(total_elements);
         auto d_payoffs = cuda_utils::make_device_buffer<float>(params.num_paths);
@@ -40,6 +42,52 @@ int main() {
         auto d_b2 = cuda_utils::make_device_buffer<float>(hidden_dim);
         auto d_W3 = cuda_utils::make_device_buffer<float>(hidden_dim * output_dim);
         auto d_b3 = cuda_utils::make_device_buffer<float>(output_dim);
+
+        // gradient buffers
+        auto d_gW1 = cuda_utils::make_device_buffer<float>(hidden_dim * input_dim);
+        auto d_gb1 = cuda_utils::make_device_buffer<float>(hidden_dim);
+        auto d_gW2 = cuda_utils::make_device_buffer<float>(hidden_dim * hidden_dim);
+        auto d_gb2 = cuda_utils::make_device_buffer<float>(hidden_dim);
+        auto d_gW3 = cuda_utils::make_device_buffer<float>(hidden_dim * output_dim);
+        auto d_gb3 = cuda_utils::make_device_buffer<float>(output_dim);
+
+        // Adam 1st moment (m) buffers
+        auto d_mW1 = cuda_utils::make_device_buffer<float>(hidden_dim * input_dim);
+        auto d_mb1 = cuda_utils::make_device_buffer<float>(hidden_dim);
+        auto d_mW2 = cuda_utils::make_device_buffer<float>(hidden_dim * hidden_dim);
+        auto d_mb2 = cuda_utils::make_device_buffer<float>(hidden_dim);
+        auto d_mW3 = cuda_utils::make_device_buffer<float>(hidden_dim * output_dim);
+        auto d_mb3 = cuda_utils::make_device_buffer<float>(output_dim);
+
+        // Adam 2nd moment (v) buffers
+        auto d_vW1 = cuda_utils::make_device_buffer<float>(hidden_dim * input_dim);
+        auto d_vb1 = cuda_utils::make_device_buffer<float>(hidden_dim);
+        auto d_vW2 = cuda_utils::make_device_buffer<float>(hidden_dim * hidden_dim);
+        auto d_vb2 = cuda_utils::make_device_buffer<float>(hidden_dim);
+        auto d_vW3 = cuda_utils::make_device_buffer<float>(hidden_dim * output_dim);
+        auto d_vb3 = cuda_utils::make_device_buffer<float>(output_dim);
+
+        // zero-init Adam state buffers and grad buffers
+        CUDA_CHECK(cudaMemset(d_gW1.get(), 0, hidden_dim * input_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_gb1.get(), 0, hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_gW2.get(), 0, hidden_dim * hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_gb2.get(), 0, hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_gW3.get(), 0, hidden_dim * output_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_gb3.get(), 0, output_dim * sizeof(float)));
+
+        CUDA_CHECK(cudaMemset(d_mW1.get(), 0, hidden_dim * input_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_mb1.get(), 0, hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_mW2.get(), 0, hidden_dim * hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_mb2.get(), 0, hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_mW3.get(), 0, hidden_dim * output_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_mb3.get(), 0, output_dim * sizeof(float)));
+
+        CUDA_CHECK(cudaMemset(d_vW1.get(), 0, hidden_dim * input_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_vb1.get(), 0, hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_vW2.get(), 0, hidden_dim * hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_vb2.get(), 0, hidden_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_vW3.get(), 0, hidden_dim * output_dim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_vb3.get(), 0, output_dim * sizeof(float)));
 
         // host vectors to store weights and biases
         std::vector<float> h_W1(hidden_dim * input_dim);
@@ -67,124 +115,76 @@ int main() {
         CUDA_CHECK(cudaMemcpy(d_W3.get(), h_W3.data(), h_W3.size() * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_b3.get(), h_b3.data(), h_b3.size() * sizeof(float), cudaMemcpyHostToDevice));
 
+        // MLP initialization
         MLPWeights weights{
             d_W1.get(), d_b1.get(),
             d_W2.get(), d_b2.get(),
             d_W3.get(), d_b3.get()
         };
 
+        MLPGradients grads{
+            d_gW1.get(), d_gb1.get(),
+            d_gW2.get(), d_gb2.get(),
+            d_gW3.get(), d_gb3.get()
+        };
+
+        AdamState adam_state{
+            d_mW1.get(), d_mb1.get(), d_mW2.get(), d_mb2.get(), d_mW3.get(), d_mb3.get(),
+            d_vW1.get(), d_vb1.get(), d_vW2.get(), d_vb2.get(), d_vW3.get(), d_vb3.get()
+        };
+
+        AdamParams adam_params;
+        adam_params.lr = 0.008f;
+
         std::cout << "launching generator..." << std::endl;
         generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params);
 
-        std::cout << "running neural policy network forward pass..." << std::endl;
-        forward_pass(d_paths.get(), d_policy_deltas.get(), weights, params);    
-
-        std::cout << "validating on cpu..." << std::endl;
-
-        std::vector<float> h_paths(total_elements);
-        CUDA_CHECK(cudaMemcpy(
-            h_paths.data(),
-            d_paths.get(),
-            total_elements * sizeof(float),
-            cudaMemcpyDeviceToHost
-        ));
-
         std::vector<float> h_payoffs(params.num_paths);
-        CUDA_CHECK(cudaMemcpy(
-            h_payoffs.data(),
-            d_payoffs.get(),
-            params.num_paths * sizeof(float),
-            cudaMemcpyDeviceToHost
-        ));
-
-        std::vector<float> h_deltas(params.num_paths * params.num_steps);
-        CUDA_CHECK(cudaMemcpy(
-            h_deltas.data(),
-            d_deltas.get(),
-            params.num_paths * params.num_steps * sizeof(float),
-            cudaMemcpyDeviceToHost
-        ));
-
-        std::vector<float> h_policy_deltas(params.num_paths * params.num_steps);
-        CUDA_CHECK(cudaMemcpy(
-            h_policy_deltas.data(),
-            d_policy_deltas.get(),
-            params.num_paths * params.num_steps * sizeof(float),
-            cudaMemcpyDeviceToHost
-        ));
-
-        double sum_ST = 0.0;
-        for (int i = 0; i < params.num_paths; ++i) {
-            int final_step_idx = (i * params.num_steps) + (params.num_steps - 1);
-            sum_ST += h_paths[final_step_idx];
-        }
-
-        // ---------- option price calculations
+        CUDA_CHECK(cudaMemcpy(h_payoffs.data(), d_payoffs.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
         double sum_payoffs = std::accumulate(h_payoffs.begin(), h_payoffs.end(), 0.0);
-        double mean_payoff = sum_payoffs / params.num_paths;
+        params.option_price = std::exp(-params.r * params.T) * (sum_payoffs / params.num_paths);
 
-        double mc_call_price = std::exp(-params.r * params.T) * mean_payoff;
-
-        std::cout << "Monte Carlo Call Price: " << mc_call_price << std::endl;
-        params.option_price = mc_call_price;
-
-        double simulated_mean_ST = sum_ST / params.num_paths;
-        double theoretical_mean_ST = params.S0 * std::exp(params.r * params.T);
-
-        std::cout << "simulated  mean S_T: " << simulated_mean_ST << std::endl;
-        std::cout << "theoretical mean S_T: " << theoretical_mean_ST << std::endl;
-
-        // validate delta at t = 0
-        std::cout << "initial black-scholes delta (t=0): " << h_deltas[0] << std::endl;
-
-        // validate terminal delta at t = N-1 for path 0
-        int path0_terminal_idx = (0 * params.num_steps) + (params.num_steps - 1);
-        std::cout << "path 0 terminal price: " << h_paths[path0_terminal_idx] << std::endl;
-        std::cout << "path 0 terminal delta: " << h_deltas[path0_terminal_idx] << std::endl;
-
-        // validate policy deltas
-        std::cout << "initial policy delta (t=0): " << h_policy_deltas[0] << std::endl;
-        std::cout << "path 0 terminal policy delta (t=N-1): " << h_policy_deltas[path0_terminal_idx] << std::endl;
-
-        // validate portfolio
+        // evaluate Black-Scholes baseline
         evaluate_portfolio(d_paths.get(), d_payoffs.get(), d_deltas.get(), d_portfolio_values.get(), params);
-
         std::vector<float> h_portfolio_values(params.num_paths);
-        CUDA_CHECK(cudaMemcpy(
-            h_portfolio_values.data(),
-            d_portfolio_values.get(),
-            params.num_paths * sizeof(float),
-            cudaMemcpyDeviceToHost
-        ));
+        CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
 
-        // ---------- calculate Black-Scholes MSE Loss
         double sum_sq_error_bs = 0.0;
-        for (int i = 0; i < params.num_paths; ++i) {
-            float V_T = h_portfolio_values[i];
-            sum_sq_error_bs += (V_T * V_T);
+        for (float v : h_portfolio_values) sum_sq_error_bs += (v * v);
+        double bs_mse_loss = sum_sq_error_bs / params.num_paths;
+
+        std::cout << "black-scholes baseline MSE loss (" << params.cost_ratio * 10000 << " bps fee): " << bs_mse_loss << std::endl;
+
+        // --- training loop
+        std::cout << "mlp training..." << std::endl;
+        int num_epochs = 1000;
+
+        for(int epoch = 1; epoch <= num_epochs; ++epoch){
+            // regenerate market paths each epoch
+            generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params, 1234ULL + epoch);
+
+            // forward pass
+            forward_pass(d_paths.get(), d_policy_deltas.get(), weights, params);
+
+            // portfolio eval
+            evaluate_portfolio(d_paths.get(), d_payoffs.get(), d_policy_deltas.get(), d_portfolio_values.get(), params);
+
+            // backprop through time 
+            bptt_backward_pass(d_paths.get(), d_payoffs.get(), d_policy_deltas.get(), d_portfolio_values.get(), weights, grads, params);
+
+            // adam optim step
+            adam_step(weights, grads, adam_state, adam_params);
+            adam_params.time_step++;
+
+            CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+            double sum_sq_error = 0.0;
+            for (float v : h_portfolio_values) sum_sq_error += (v * v);
+            double policy_mse_loss = sum_sq_error / params.num_paths;
+            
+            if(epoch % 10 == 0){
+                std::cout << "epoch [" << epoch << "/" << num_epochs << "] MSE loss: " << policy_mse_loss << std::endl;
+            }
         }
-        double mse_loss_bs = sum_sq_error_bs / params.num_paths;
-
-        std::cout << "black-scholes hedging MSE loss (" << params.cost_ratio * 10000 << "bps fee): " << mse_loss_bs << std::endl;
-
-        // evaluate untrained neural policy network
-        evaluate_portfolio(d_paths.get(), d_payoffs.get(), d_policy_deltas.get(), d_portfolio_values.get(), params);
-
-        CUDA_CHECK(cudaMemcpy(
-            h_portfolio_values.data(),
-            d_portfolio_values.get(),
-            params.num_paths * sizeof(float),
-            cudaMemcpyDeviceToHost
-        ));
-
-        double sum_sq_error_policy = 0.0;
-        for (int i = 0; i < params.num_paths; ++i) {
-            float V_T = h_portfolio_values[i];
-            sum_sq_error_policy += (V_T * V_T);
-        }
-        double mse_loss_policy = sum_sq_error_policy / params.num_paths;
-
-        std::cout << "untrained policy hedging MSE loss: " << mse_loss_policy << std::endl;
 
         std::cout << "done!" << std::endl;
 

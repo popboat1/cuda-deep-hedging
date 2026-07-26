@@ -2,7 +2,9 @@
 #include <vector>
 #include <cmath>
 #include <numeric>
+#include <random>
 #include "simulation.h"
+#include "mlp.h"
 
 int main() {
     try {
@@ -16,6 +18,9 @@ int main() {
         params.dt = params.T / params.num_steps;
         params.K = 100.0f; // strike price (at the money)
 
+        // query seed
+        std::mt19937 rng(42);
+
         std::cout << "allocating vram for " << params.num_paths << " paths..." << std::endl;
         
         // allocate buffer
@@ -23,9 +28,53 @@ int main() {
         auto d_paths = cuda_utils::make_device_buffer<float>(total_elements);
         auto d_payoffs = cuda_utils::make_device_buffer<float>(params.num_paths);
         auto d_deltas = cuda_utils::make_device_buffer<float>(params.num_paths * params.num_steps);
+        auto d_policy_deltas = cuda_utils::make_device_buffer<float>(params.num_paths * params.num_steps);
+
+        // buffers for weights and biases
+        auto d_W1 = cuda_utils::make_device_buffer<float>(hidden_dim * input_dim);
+        auto d_b1 = cuda_utils::make_device_buffer<float>(hidden_dim);
+        auto d_W2 = cuda_utils::make_device_buffer<float>(hidden_dim * hidden_dim);
+        auto d_b2 = cuda_utils::make_device_buffer<float>(hidden_dim);
+        auto d_W3 = cuda_utils::make_device_buffer<float>(hidden_dim * output_dim);
+        auto d_b3 = cuda_utils::make_device_buffer<float>(output_dim);
+
+        // host vectors to store weights and biases
+        std::vector<float> h_W1(hidden_dim * input_dim);
+        std::vector<float> h_b1(hidden_dim);
+        std::vector<float> h_W2(hidden_dim * hidden_dim);
+        std::vector<float> h_b2(hidden_dim);
+        std::vector<float> h_W3(hidden_dim * output_dim);
+        std::vector<float> h_b3(output_dim);
+
+        // init weights with Xavier init
+        auto fill_xavier = [&](std::vector<float>& vec, float std_dev) {
+            std::normal_distribution<float> dist(0.0f, std_dev);
+            for (auto& val : vec) val = dist(rng);
+        };
+
+        fill_xavier(h_W1, std::sqrt(2.0f / (input_dim + hidden_dim)));
+        fill_xavier(h_W2, std::sqrt(2.0f / (hidden_dim + hidden_dim)));
+        fill_xavier(h_W3, std::sqrt(2.0f / (hidden_dim + output_dim)));
+
+        // --- copy weights to device
+        CUDA_CHECK(cudaMemcpy(d_W1.get(), h_W1.data(), h_W1.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_b1.get(), h_b1.data(), h_b1.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_W2.get(), h_W2.data(), h_W2.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_b2.get(), h_b2.data(), h_b2.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_W3.get(), h_W3.data(), h_W3.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_b3.get(), h_b3.data(), h_b3.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+        MLPWeights weights{
+            d_W1.get(), d_b1.get(),
+            d_W2.get(), d_b2.get(),
+            d_W3.get(), d_b3.get()
+        };
 
         std::cout << "launching generator..." << std::endl;
         generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params);
+
+        std::cout << "running neural policy network forward pass..." << std::endl;
+        forward_pass(d_paths.get(), d_policy_deltas.get(), weights, params);    
 
         std::cout << "validating on cpu..." << std::endl;
 
@@ -49,6 +98,14 @@ int main() {
         CUDA_CHECK(cudaMemcpy(
             h_deltas.data(),
             d_deltas.get(),
+            params.num_paths * params.num_steps * sizeof(float),
+            cudaMemcpyDeviceToHost
+        ));
+
+        std::vector<float> h_policy_deltas(params.num_paths * params.num_steps);
+        CUDA_CHECK(cudaMemcpy(
+            h_policy_deltas.data(),
+            d_policy_deltas.get(),
             params.num_paths * params.num_steps * sizeof(float),
             cudaMemcpyDeviceToHost
         ));
@@ -80,6 +137,10 @@ int main() {
         int path0_terminal_idx = (0 * params.num_steps) + (params.num_steps - 1);
         std::cout << "path 0 terminal price: " << h_paths[path0_terminal_idx] << std::endl;
         std::cout << "path 0 terminal delta: " << h_deltas[path0_terminal_idx] << std::endl;
+
+        // validate policy deltas
+        std::cout << "initial policy delta (t=0): " << h_policy_deltas[0] << std::endl;
+        std::cout << "path 0 terminal policy delta (t=N-1): " << h_policy_deltas[path0_terminal_idx] << std::endl;
 
         std::cout << "done!" << std::endl;
 

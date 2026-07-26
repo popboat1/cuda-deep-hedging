@@ -5,6 +5,7 @@
 #include <random>
 #include "simulation.h"
 #include "mlp.h"
+#include "portfolio.h"
 
 int main() {
     try {
@@ -17,6 +18,7 @@ int main() {
         params.T = 1.0f / 12.0f; // 1 month
         params.dt = params.T / params.num_steps;
         params.K = 100.0f; // strike price (at the money)
+        params.cost_ratio = 0.001f;
 
         // query seed
         std::mt19937 rng(42);
@@ -29,6 +31,7 @@ int main() {
         auto d_payoffs = cuda_utils::make_device_buffer<float>(params.num_paths);
         auto d_deltas = cuda_utils::make_device_buffer<float>(params.num_paths * params.num_steps);
         auto d_policy_deltas = cuda_utils::make_device_buffer<float>(params.num_paths * params.num_steps);
+        auto d_portfolio_values = cuda_utils::make_device_buffer<float>(params.num_paths);
 
         // buffers for weights and biases
         auto d_W1 = cuda_utils::make_device_buffer<float>(hidden_dim * input_dim);
@@ -123,6 +126,7 @@ int main() {
         double mc_call_price = std::exp(-params.r * params.T) * mean_payoff;
 
         std::cout << "Monte Carlo Call Price: " << mc_call_price << std::endl;
+        params.option_price = mc_call_price;
 
         double simulated_mean_ST = sum_ST / params.num_paths;
         double theoretical_mean_ST = params.S0 * std::exp(params.r * params.T);
@@ -141,6 +145,46 @@ int main() {
         // validate policy deltas
         std::cout << "initial policy delta (t=0): " << h_policy_deltas[0] << std::endl;
         std::cout << "path 0 terminal policy delta (t=N-1): " << h_policy_deltas[path0_terminal_idx] << std::endl;
+
+        // validate portfolio
+        evaluate_portfolio(d_paths.get(), d_payoffs.get(), d_deltas.get(), d_portfolio_values.get(), params);
+
+        std::vector<float> h_portfolio_values(params.num_paths);
+        CUDA_CHECK(cudaMemcpy(
+            h_portfolio_values.data(),
+            d_portfolio_values.get(),
+            params.num_paths * sizeof(float),
+            cudaMemcpyDeviceToHost
+        ));
+
+        // ---------- calculate Black-Scholes MSE Loss
+        double sum_sq_error_bs = 0.0;
+        for (int i = 0; i < params.num_paths; ++i) {
+            float V_T = h_portfolio_values[i];
+            sum_sq_error_bs += (V_T * V_T);
+        }
+        double mse_loss_bs = sum_sq_error_bs / params.num_paths;
+
+        std::cout << "black-scholes hedging MSE loss (" << params.cost_ratio * 10000 << "bps fee): " << mse_loss_bs << std::endl;
+
+        // evaluate untrained neural policy network
+        evaluate_portfolio(d_paths.get(), d_payoffs.get(), d_policy_deltas.get(), d_portfolio_values.get(), params);
+
+        CUDA_CHECK(cudaMemcpy(
+            h_portfolio_values.data(),
+            d_portfolio_values.get(),
+            params.num_paths * sizeof(float),
+            cudaMemcpyDeviceToHost
+        ));
+
+        double sum_sq_error_policy = 0.0;
+        for (int i = 0; i < params.num_paths; ++i) {
+            float V_T = h_portfolio_values[i];
+            sum_sq_error_policy += (V_T * V_T);
+        }
+        double mse_loss_policy = sum_sq_error_policy / params.num_paths;
+
+        std::cout << "untrained policy hedging MSE loss: " << mse_loss_policy << std::endl;
 
         std::cout << "done!" << std::endl;
 

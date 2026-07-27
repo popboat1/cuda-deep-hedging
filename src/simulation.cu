@@ -12,25 +12,24 @@ __global__ void compute_bs_delta(float* d_paths, float* d_deltas, SimulationPara
     int path_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(path_idx >= params.num_paths) return;
 
-    int path_offset = path_idx * params.num_steps;
-
     // pre-compute some constants
     float sigma_sq = params.sigma * params.sigma;
     float num_term = (params.r + 0.5f * sigma_sq); // (r + (sigma^2 / 2))
 
     for(int t = 0; t < params.num_steps; ++t){
+        int curr_idx = t * params.num_paths + path_idx;
         // time remaining
         float tau = params.T - (t * params.dt);
 
         // get curr stock price
-        float S_t = d_paths[path_offset + t];
+        float S_t = d_paths[curr_idx];
 
         if (tau <= 0.0f || t == params.num_steps - 1) {
-            d_deltas[path_offset + t] = (S_t > params.K) ? 1.0f : 0.0f;
+            d_deltas[curr_idx] = (S_t > params.K) ? 1.0f : 0.0f;
         } else {
             // calculate d1
             float d1 = (logf(S_t / params.K) + (num_term * tau)) / (params.sigma * sqrtf(tau));
-            d_deltas[path_offset + t] = normcdff(d1);
+            d_deltas[curr_idx] = normcdff(d1);
         }
     }
 }
@@ -49,11 +48,9 @@ __global__ void gbm_path_kernel(curandState* states, float* d_paths, SimulationP
     
     float curr_S = params.S0;
     
-    int path_offset = path_idx * params.num_steps;
-    
     for(int t = 0; t < params.num_steps; ++t){
         // write curr price to VRAM at step t
-        d_paths[path_offset + t] = curr_S;
+        d_paths[t * params.num_paths + path_idx] = curr_S;
         // draw normal gaussian random noise
         float Z = curand_normal(&local_state);
         // advance stock price to t + 1
@@ -67,8 +64,7 @@ __global__ void compute_payoffs(float* d_paths, float* d_payoffs, SimulationPara
     int path_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (path_idx >= params.num_paths) return;
 
-    int final_step_idx = (path_idx * params.num_steps) + (params.num_steps - 1);
-
+    int final_step_idx = (params.num_steps - 1) * params.num_paths + path_idx;
     float S_T = d_paths[final_step_idx];
 
     d_payoffs[path_idx] = fmaxf(S_T - params.K, 0);

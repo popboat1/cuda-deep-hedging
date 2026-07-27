@@ -16,7 +16,8 @@ __global__ void forward(
 
     for(int t = 0; t < params.num_steps; ++t){
         // get curr stock price
-        float S_t = d_paths[path_offset + t];
+        int curr_idx = t * params.num_paths + path_idx;
+        float S_t = d_paths[curr_idx];
     
         // compute tau (time-to-expiry)
         float tau = params.T - (t * params.dt);
@@ -54,7 +55,7 @@ __global__ void forward(
         // sigmoid
         float policy_delta = 1.0f / (1.0f + expf(-out));
         // store output delta & update prev_delta for next step
-        d_policy_deltas[path_offset + t] = policy_delta;
+        d_policy_deltas[curr_idx] = policy_delta;
         prev_delta = policy_delta;
     }
 }

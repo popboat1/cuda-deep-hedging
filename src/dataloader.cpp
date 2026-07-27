@@ -59,14 +59,14 @@ RealDataset load_and_normalize_real_csv(const std::string& filepath, const Simul
         int path_offset = row * ds.num_steps;
         for (int t = 0; t < ds.num_steps; ++t) {
             float S_t = raw_prices[t] * scale;
-            ds.h_paths[path_offset + t] = S_t;
+            ds.h_paths[t * ds.num_paths + row] = S_t;
 
             float tau = params.T - (t * params.dt);
             if (tau <= 0.0f || t == ds.num_steps - 1) {
-                ds.h_deltas[path_offset + t] = (S_t > params.K) ? 1.0f : 0.0f;
+                ds.h_deltas[t * ds.num_paths + row] = (S_t > params.K) ? 1.0f : 0.0f;
             } else {
                 float d1 = (std::log(S_t / params.K) + (num_term * tau)) / (params.sigma * std::sqrt(tau));
-                ds.h_deltas[path_offset + t] = 0.5f * std::erfc(-d1 * M_SQRT1_2);
+                ds.h_deltas[t * ds.num_paths + row] = 0.5f * std::erfc(-d1 * M_SQRT1_2);
             }
         }
         row++;

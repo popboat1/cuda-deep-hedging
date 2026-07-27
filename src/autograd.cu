@@ -40,8 +40,6 @@ __global__ void bptt_backward(
     bool active = (path_idx < params.num_paths);
 
     if(active){
-        int path_offset = path_idx * params.num_steps;
-    
         float V_T = d_portfolio_values[path_idx];
         float dL_dV_T = (2.0f / params.num_paths) * V_T;
     
@@ -49,11 +47,12 @@ __global__ void bptt_backward(
         float upstream_d_delta = 0.0f;
     
         for(int t = params.num_steps - 1; t >= 0; --t){
-            float S_t = d_paths[path_offset + t];
-            float delta_t = d_policy_deltas[path_offset + t];
+            int curr_idx = t * params.num_paths + path_idx;
+            float S_t = d_paths[curr_idx];
+            float delta_t = d_policy_deltas[curr_idx];
     
             // --- fetch prev position & re-evaluate activations
-            float prev_delta = (t > 0) ? d_policy_deltas[path_offset + (t - 1)] : 0.0f;
+            float prev_delta = (t > 0) ? d_policy_deltas[(t - 1) * params.num_paths + path_idx] : 0.0f;
             float tau = params.T - (t * params.dt);
             float tau_norm = tau / params.T;
     
@@ -91,8 +90,9 @@ __global__ void bptt_backward(
                 dVT_ddelta = S_t * (1.0f - (1.0f + params.cost_ratio * sign_t) * exp_r_dt);
             } else {
                 // intermediate step: cash drain accrued to time T
-                float S_next = d_paths[path_offset + t + 1];
-                float next_delta = d_policy_deltas[path_offset + t + 1];
+                int next_idx = (t + 1) * params.num_paths + path_idx;
+                float S_next = d_paths[next_idx];
+                float next_delta = d_policy_deltas[next_idx];
                 float sign_next = signf(next_delta - delta_t);
     
                 float step_return = -S_t * (1.0f + params.cost_ratio * sign_t) * exp_r_dt

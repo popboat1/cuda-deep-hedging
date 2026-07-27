@@ -4,6 +4,8 @@
 #include <cmath>
 #include <numeric>
 #include <random>
+#include <filesystem>
+
 #include "simulation.h"
 #include "mlp.h"
 #include "portfolio.h"
@@ -14,6 +16,9 @@
 
 int main() {
     try {
+        // guard create results directory if missing
+        std::filesystem::create_directories("../results");
+        
         SimulationParams params;
         params.num_steps = 30;
         params.S0 = 100.0f;
@@ -27,7 +32,7 @@ int main() {
         // query seed
         std::mt19937 rng(42);
 
-        RealDataset train_ds = load_and_normalize_real_csv("real_train_paths.csv", params);
+        RealDataset train_ds = load_and_normalize_real_csv("../data/BTC-USD_train_paths.csv", params);
         params.num_paths = train_ds.num_paths;
 
         std::cout << "allocating vram for " << params.num_paths << " paths..." << std::endl;
@@ -195,28 +200,28 @@ int main() {
             adam_step(weights, grads, adam_state, adam_params);
             adam_params.time_step++;
 
-            // evaluate current epoch loss & perform checkpointing
-            CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
-            double sum_sq_error = 0.0;
-            for (float v : h_portfolio_values) sum_sq_error += (v * v);
-            double policy_mse_loss = sum_sq_error / params.num_paths;
-
-            // save weight checkpoint if new best loss achieved
-            if (policy_mse_loss < best_loss) {
-                best_loss = policy_mse_loss;
-                best_epoch = epoch;
-
-                CUDA_CHECK(cudaMemcpy(best_W1.data(), d_W1.get(), best_W1.size() * sizeof(float), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(best_W2.data(), d_W2.get(), best_W2.size() * sizeof(float), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(best_W3.data(), d_W3.get(), best_W3.size() * sizeof(float), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(best_b1.data(), d_b1.get(), best_b1.size() * sizeof(float), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(best_b2.data(), d_b2.get(), best_b2.size() * sizeof(float), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(best_b3.data(), d_b3.get(), best_b3.size() * sizeof(float), cudaMemcpyDeviceToHost));
-            }
-
-            if (epoch % 1 == 0) {
+            if(epoch % 1 == 0 || epoch == num_epochs){
+                // evaluate current epoch loss & perform checkpointing
+                CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+                double sum_sq_error = 0.0;
+                for (float v : h_portfolio_values) sum_sq_error += (v * v);
+                double policy_mse_loss = sum_sq_error / params.num_paths;
+    
+                // save weight checkpoint if new best loss achieved
+                if (policy_mse_loss < best_loss) {
+                    best_loss = policy_mse_loss;
+                    best_epoch = epoch;
+    
+                    CUDA_CHECK(cudaMemcpy(best_W1.data(), d_W1.get(), best_W1.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(best_W2.data(), d_W2.get(), best_W2.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(best_W3.data(), d_W3.get(), best_W3.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(best_b1.data(), d_b1.get(), best_b1.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(best_b2.data(), d_b2.get(), best_b2.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(best_b3.data(), d_b3.get(), best_b3.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                }
+    
                 std::cout << "epoch [" << epoch << "/" << num_epochs << "] MSE loss: " << policy_mse_loss
-                          << " (best: " << best_loss << " @ epoch " << best_epoch << ")" << std::endl;
+                            << " (best: " << best_loss << " @ epoch " << best_epoch << ")" << std::endl;
             }
         }
 
@@ -229,11 +234,11 @@ int main() {
         CUDA_CHECK(cudaMemcpy(d_W3.get(), best_W3.data(), best_W3.size() * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_b3.get(), best_b3.data(), best_b3.size() * sizeof(float), cudaMemcpyHostToDevice));
 
-        export_hedging_surface("hedging_surface.csv", weights, params);
+        export_hedging_surface("../results/hedging_surface.csv", weights, params);
 
         // out-of-sample testing
         std::cout << "\n--- running out-of-sample validation on unseen real btc test paths ---" << std::endl;
-        RealDataset test_ds = load_and_normalize_real_csv("real_test_paths.csv", params);
+        RealDataset test_ds = load_and_normalize_real_csv("../data/BTC-USD_test_paths.csv", params);
 
         SimulationParams test_params = params;
         test_params.num_paths = test_ds.num_paths;
@@ -267,7 +272,7 @@ int main() {
         CUDA_CHECK(cudaMemcpy(h_test_policy.data(), d_test_portfolio_policy.get(), test_params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
 
         // write terminal pnls
-        std::ofstream pnl_csv("test_pnl_distribution.csv");
+        std::ofstream pnl_csv("../results/test_pnl_distribution.csv");
         pnl_csv << "BS_PnL,Policy_PnL\n";
         for (int i = 0; i < test_params.num_paths; ++i) {
             pnl_csv << h_test_bs[i] << "," << h_test_policy[i] << "\n";
@@ -281,7 +286,7 @@ int main() {
         CUDA_CHECK(cudaMemcpy(h_test_traj_policy.data(), d_test_traj_policy.get(), test_elements * sizeof(float), cudaMemcpyDeviceToHost));
 
         // write mean trajectories
-        std::ofstream traj_csv("test_equity_trajectories.csv");
+        std::ofstream traj_csv("../results/test_equity_trajectories.csv");
         traj_csv << "step,bs_mean,bs_std,policy_mean,policy_std\n";
         for (int t = 0; t < test_params.num_steps; ++t) {
             double sum_bs = 0.0, sum_policy = 0.0;
@@ -308,7 +313,7 @@ int main() {
         std::cout << "exported btc equity trajectories to test_equity_trajectories.csv" << std::endl;
 
         // write sample individual path trajectories (restored)
-        std::ofstream sample_csv("sample_equity_paths.csv");
+        std::ofstream sample_csv("../results/sample_equity_paths.csv");
         sample_csv << "path_idx,step,bs_pnl,policy_pnl\n";
         int num_sample_paths = 20;
         for (int i = 0; i < num_sample_paths; ++i) {

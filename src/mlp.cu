@@ -10,21 +10,16 @@ __global__ void forward(
     int path_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (path_idx >= params.num_paths) return;
 
-    int path_offset = path_idx * params.num_steps;
     // fetch prev hedge position
     float prev_delta = 0.0f;
 
     for(int t = 0; t < params.num_steps; ++t){
         // get curr stock price
         int curr_idx = t * params.num_paths + path_idx;
-        float S_t = d_paths[curr_idx];
-    
-        // compute tau (time-to-expiry)
-        float tau = params.T - (t * params.dt);
-        float tau_norm = tau / params.T;
-    
-        // state in vector
-        float x[3] = { S_t / params.K, prev_delta, tau_norm };
+        
+        // 5 features state vector
+        float x[5];
+        compute_state_vector(d_paths, t, path_idx, prev_delta, params, x);
     
         // hidden layer 1 (3 -> 32 + ReLU)
         float h1[32];

@@ -1,4 +1,5 @@
 #include "autograd.h"
+#include "mlp.h"
 #include <cmath>
 
 __device__ inline float signf(float x) {
@@ -46,10 +47,10 @@ __global__ void bptt_backward(
     if (active) {
         float V_T = d_portfolio_values[path_idx];
         
-        // 1. Base MSE gradient active across 100% of paths
+        // base MSE gradient active across 100% of paths
         float dL_dV_T = (2.0f / params.num_paths) * V_T;
 
-        // 2. Add CVaR tail penalty gradient if path falls in worst 5% tail
+        // add CVaR tail penalty gradient if path falls in worst 5% tail
         if (use_hybrid) {
             float tail_prob = 1.0f - cvar_alpha; // e.g. 0.05
             if (V_T <= var_cutoff) {
@@ -67,10 +68,10 @@ __global__ void bptt_backward(
 
             // --- fetch prev position & re-evaluate activations
             float prev_delta = (t > 0) ? d_policy_deltas[(t - 1) * params.num_paths + path_idx] : 0.0f;
-            float tau = params.T - (t * params.dt);
-            float tau_norm = tau / params.T;
-
-            float x[3] = { S_t / params.K, prev_delta, tau_norm };
+            
+            // recompute 5-feature input state vector
+            float x[5];
+            compute_state_vector(d_paths, t, path_idx, prev_delta, params, x);
 
             // recompute layer 1
             float h1[32];

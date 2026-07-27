@@ -1,4 +1,5 @@
 #include "exporter.h"
+#include "mlp.h"
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -24,15 +25,14 @@ __global__ void evaluate_grid_kernel(
     int s_idx = idx / num_tau_points;
     int tau_idx = idx % num_tau_points;
 
-    // compute grid coordinates
     float s_ratio = s_min + s_idx * (s_max - s_min) / (num_s_points - 1);
     float tau_ratio = tau_min + tau_idx * (tau_max - tau_min) / (num_tau_points - 1);
 
     float S = s_ratio * params.K;
     float tau = tau_ratio * params.T;
 
-    // compute policy delta
-    float x[3] = { s_ratio, prev_delta_fixed, tau_ratio };
+    // evaluated at baseline momentum (r_t = 0.0) and baseline vol (sigma)
+    float x[5] = { s_ratio, prev_delta_fixed, tau_ratio, 0.0f, params.sigma };
 
     // hidden layer 1
     float h1[32];
@@ -71,7 +71,6 @@ __global__ void evaluate_grid_kernel(
         bs_delta = normcdff(d1);
     }
 
-    // save to out buffers
     d_grid_s[idx] = s_ratio;
     d_grid_tau[idx] = tau_ratio;
     d_grid_policy_delta[idx] = policy_delta;
@@ -90,7 +89,6 @@ void export_hedging_surface(
     float s_min = 0.70f, s_max = 1.30f;
     float tau_min = 0.01f, tau_max = 1.00f;
 
-    // allocate vram
     auto d_grid_s = cuda_utils::make_device_buffer<float>(total_points);
     auto d_grid_tau = cuda_utils::make_device_buffer<float>(total_points);
     auto d_grid_policy_delta = cuda_utils::make_device_buffer<float>(total_points);
@@ -110,7 +108,6 @@ void export_hedging_surface(
     );
     CUDA_CHECK_KERNEL();
 
-    // copy res to host
     std::vector<float> h_grid_s(total_points);
     std::vector<float> h_grid_tau(total_points);
     std::vector<float> h_grid_policy_delta(total_points);
@@ -121,7 +118,6 @@ void export_hedging_surface(
     CUDA_CHECK(cudaMemcpy(h_grid_policy_delta.data(), d_grid_policy_delta.get(), total_points * sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_grid_bs_delta.data(), d_grid_bs_delta.get(), total_points * sizeof(float), cudaMemcpyDeviceToHost));
 
-    // save to csv
     std::ofstream csv_file(filename);
     if (!csv_file.is_open()) {
         throw std::runtime_error("Failed to open file for writing: " + filename);

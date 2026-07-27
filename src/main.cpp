@@ -23,17 +23,17 @@ int main() {
         SimulationParams params;
         params.num_steps = 30;
         params.S0 = 100.0f;
-        params.r = 0.05f;
-        params.sigma = 0.65f; 
+        params.r = 0.04f;
+        params.sigma = 0.18f; 
         params.T = 30.0f / (365.0f * 24.0f); // (30 / 8760 years)
         params.dt = params.T / (params.num_steps - 1);
         params.K = 100.0f; // strike price (at the money)
-        params.cost_ratio = 0.0025f;
+        params.cost_ratio = 0.0010f;
 
         // query seed
         std::mt19937 rng(42);
 
-        RealDataset train_ds = load_and_normalize_real_csv("../data/BTC-USD_train_paths.csv", params);
+        RealDataset train_ds = load_and_normalize_real_csv("../data/GSPC_train_paths.csv", params);
         params.num_paths = train_ds.num_paths;
 
         std::cout << "allocating vram for " << params.num_paths << " paths..." << std::endl;
@@ -263,7 +263,7 @@ int main() {
 
         // out-of-sample testing
         std::cout << "\n--- running out-of-sample validation on unseen real btc test paths ---" << std::endl;
-        RealDataset test_ds = load_and_normalize_real_csv("../data/BTC-USD_test_paths.csv", params);
+        RealDataset test_ds = load_and_normalize_real_csv("../data/GSPC_test_paths.csv", params);
 
         SimulationParams test_params = params;
         test_params.num_paths = test_ds.num_paths;

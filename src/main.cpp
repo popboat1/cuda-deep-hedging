@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <cmath>
 #include <numeric>
@@ -9,22 +10,25 @@
 #include "autograd.h"
 #include "optimizer.h"
 #include "exporter.h"
+#include "dataloader.h"
 
 int main() {
     try {
         SimulationParams params;
-        params.num_paths = 10000;
         params.num_steps = 30;
         params.S0 = 100.0f;
         params.r = 0.05f;
-        params.sigma = 0.2f;
-        params.T = 1.0f / 12.0f; // 1 month
+        params.sigma = 0.65f; 
+        params.T = 30.0f / (365.0f * 24.0f); // (30 / 8760 years)
         params.dt = params.T / params.num_steps;
         params.K = 100.0f; // strike price (at the money)
-        params.cost_ratio = 0.001f;
+        params.cost_ratio = 0.0025f;
 
         // query seed
         std::mt19937 rng(42);
+
+        RealDataset train_ds = load_and_normalize_real_csv("real_train_paths.csv", params);
+        params.num_paths = train_ds.num_paths;
 
         std::cout << "allocating vram for " << params.num_paths << " paths..." << std::endl;
         
@@ -35,6 +39,11 @@ int main() {
         auto d_deltas = cuda_utils::make_device_buffer<float>(params.num_paths * params.num_steps);
         auto d_policy_deltas = cuda_utils::make_device_buffer<float>(params.num_paths * params.num_steps);
         auto d_portfolio_values = cuda_utils::make_device_buffer<float>(params.num_paths);
+
+        // copy real data to VRAM
+        CUDA_CHECK(cudaMemcpy(d_paths.get(), train_ds.h_paths.data(), total_elements * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_payoffs.get(), train_ds.h_payoffs.data(), params.num_paths * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_deltas.get(), train_ds.h_deltas.data(), total_elements * sizeof(float), cudaMemcpyHostToDevice));
 
         // buffers for weights and biases
         auto d_W1 = cuda_utils::make_device_buffer<float>(hidden_dim * input_dim);
@@ -98,6 +107,14 @@ int main() {
         std::vector<float> h_W3(hidden_dim * output_dim);
         std::vector<float> h_b3(output_dim);
 
+        // host checkpoint vectors for best weights
+        std::vector<float> best_W1(hidden_dim * input_dim);
+        std::vector<float> best_b1(hidden_dim);
+        std::vector<float> best_W2(hidden_dim * hidden_dim);
+        std::vector<float> best_b2(hidden_dim);
+        std::vector<float> best_W3(hidden_dim * output_dim);
+        std::vector<float> best_b3(output_dim);
+
         // init weights with Xavier init
         auto fill_xavier = [&](std::vector<float>& vec, float std_dev) {
             std::normal_distribution<float> dist(0.0f, std_dev);
@@ -135,7 +152,7 @@ int main() {
         };
 
         AdamParams adam_params;
-        adam_params.lr = 0.008f;
+        adam_params.lr = 0.005f;
 
         std::cout << "launching generator..." << std::endl;
         generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params);
@@ -158,11 +175,13 @@ int main() {
 
         // --- training loop
         std::cout << "mlp training..." << std::endl;
-        int num_epochs = 1000;
+        int num_epochs = 2000;
+        double best_loss = std::numeric_limits<double>::max();
+        int best_epoch = 0;
 
         for(int epoch = 1; epoch <= num_epochs; ++epoch){
             // regenerate market paths each epoch
-            generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params, 1234ULL + epoch);
+            // generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params, 1234ULL + epoch);
 
             // forward pass
             forward_pass(d_paths.get(), d_policy_deltas.get(), weights, params);
@@ -177,16 +196,130 @@ int main() {
             adam_step(weights, grads, adam_state, adam_params);
             adam_params.time_step++;
 
-            if(epoch % 10 == 0){
-                CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
-                double sum_sq_error = 0.0;
-                for (float v : h_portfolio_values) sum_sq_error += (v * v);
-                double policy_mse_loss = sum_sq_error / params.num_paths;
-                std::cout << "epoch [" << epoch << "/" << num_epochs << "] MSE loss: " << policy_mse_loss << std::endl;
+            // evaluate current epoch loss & perform checkpointing
+            CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+            double sum_sq_error = 0.0;
+            for (float v : h_portfolio_values) sum_sq_error += (v * v);
+            double policy_mse_loss = sum_sq_error / params.num_paths;
+
+            // save weight checkpoint if new best loss achieved
+            if (policy_mse_loss < best_loss) {
+                best_loss = policy_mse_loss;
+                best_epoch = epoch;
+
+                CUDA_CHECK(cudaMemcpy(best_W1.data(), d_W1.get(), best_W1.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(best_W2.data(), d_W2.get(), best_W2.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(best_W3.data(), d_W3.get(), best_W3.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(best_b1.data(), d_b1.get(), best_b1.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(best_b2.data(), d_b2.get(), best_b2.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(best_b3.data(), d_b3.get(), best_b3.size() * sizeof(float), cudaMemcpyDeviceToHost));
+            }
+
+            if (epoch % 1 == 0) {
+                std::cout << "epoch [" << epoch << "/" << num_epochs << "] MSE loss: " << policy_mse_loss
+                          << " (best: " << best_loss << " @ epoch " << best_epoch << ")" << std::endl;
             }
         }
 
+        // restore best weights to device
+        std::cout << "\nrestoring best weights from epoch " << best_epoch << " (best training MSE: " << best_loss << ")..." << std::endl;
+        CUDA_CHECK(cudaMemcpy(d_W1.get(), best_W1.data(), best_W1.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_b1.get(), best_b1.data(), best_b1.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_W2.get(), best_W2.data(), best_W2.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_b2.get(), best_b2.data(), best_b2.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_W3.get(), best_W3.data(), best_W3.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_b3.get(), best_b3.data(), best_b3.size() * sizeof(float), cudaMemcpyHostToDevice));
+
         export_hedging_surface("hedging_surface.csv", weights, params);
+
+        // out-of-sample testing
+        std::cout << "\n--- running out-of-sample validation on unseen real btc test paths ---" << std::endl;
+        RealDataset test_ds = load_and_normalize_real_csv("real_test_paths.csv", params);
+
+        SimulationParams test_params = params;
+        test_params.num_paths = test_ds.num_paths;
+
+        size_t test_elements = test_params.num_paths * test_params.num_steps;
+        auto d_test_paths = cuda_utils::make_device_buffer<float>(test_elements);
+        auto d_test_payoffs = cuda_utils::make_device_buffer<float>(test_params.num_paths);
+        auto d_test_bs_deltas = cuda_utils::make_device_buffer<float>(test_elements);
+        auto d_test_policy_deltas = cuda_utils::make_device_buffer<float>(test_elements);
+        auto d_test_portfolio_bs = cuda_utils::make_device_buffer<float>(test_params.num_paths);
+        auto d_test_portfolio_policy = cuda_utils::make_device_buffer<float>(test_params.num_paths);
+
+        auto d_test_traj_bs = cuda_utils::make_device_buffer<float>(test_elements);
+        auto d_test_traj_policy = cuda_utils::make_device_buffer<float>(test_elements);
+
+        CUDA_CHECK(cudaMemcpy(d_test_paths.get(), test_ds.h_paths.data(), test_elements * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_test_payoffs.get(), test_ds.h_payoffs.data(), test_params.num_paths * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_test_bs_deltas.get(), test_ds.h_deltas.data(), test_elements * sizeof(float), cudaMemcpyHostToDevice));
+
+        forward_pass(d_test_paths.get(), d_test_policy_deltas.get(), weights, test_params);
+
+        evaluate_portfolio(d_test_paths.get(), d_test_payoffs.get(), d_test_bs_deltas.get(), d_test_portfolio_bs.get(), test_params);
+        evaluate_portfolio(d_test_paths.get(), d_test_payoffs.get(), d_test_policy_deltas.get(), d_test_portfolio_policy.get(), test_params);
+
+        evaluate_portfolio_trajectories(d_test_paths.get(), d_test_payoffs.get(), d_test_bs_deltas.get(), d_test_traj_bs.get(), test_params);
+        evaluate_portfolio_trajectories(d_test_paths.get(), d_test_payoffs.get(), d_test_policy_deltas.get(), d_test_traj_policy.get(), test_params);
+
+        std::vector<float> h_test_bs(test_params.num_paths);
+        std::vector<float> h_test_policy(test_params.num_paths);
+        CUDA_CHECK(cudaMemcpy(h_test_bs.data(), d_test_portfolio_bs.get(), test_params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_test_policy.data(), d_test_portfolio_policy.get(), test_params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+
+        // write terminal pnls
+        std::ofstream pnl_csv("test_pnl_distribution.csv");
+        pnl_csv << "BS_PnL,Policy_PnL\n";
+        for (int i = 0; i < test_params.num_paths; ++i) {
+            pnl_csv << h_test_bs[i] << "," << h_test_policy[i] << "\n";
+        }
+        pnl_csv.close();
+        std::cout << "exported btc test PnLs to test_pnl_distribution.csv" << std::endl;
+
+        std::vector<float> h_test_traj_bs(test_elements);
+        std::vector<float> h_test_traj_policy(test_elements);
+        CUDA_CHECK(cudaMemcpy(h_test_traj_bs.data(), d_test_traj_bs.get(), test_elements * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_test_traj_policy.data(), d_test_traj_policy.get(), test_elements * sizeof(float), cudaMemcpyDeviceToHost));
+
+        // write mean trajectories
+        std::ofstream traj_csv("test_equity_trajectories.csv");
+        traj_csv << "step,bs_mean,bs_std,policy_mean,policy_std\n";
+        for (int t = 0; t < test_params.num_steps; ++t) {
+            double sum_bs = 0.0, sum_policy = 0.0;
+            for (int i = 0; i < test_params.num_paths; ++i) {
+                sum_bs += h_test_traj_bs[i * test_params.num_steps + t];
+                sum_policy += h_test_traj_policy[i * test_params.num_steps + t];
+            }
+            double mean_bs = sum_bs / test_params.num_paths;
+            double mean_policy = sum_policy / test_params.num_paths;
+
+            double var_bs = 0.0, var_policy = 0.0;
+            for (int i = 0; i < test_params.num_paths; ++i) {
+                double diff_bs = h_test_traj_bs[i * test_params.num_steps + t] - mean_bs;
+                double diff_policy = h_test_traj_policy[i * test_params.num_steps + t] - mean_policy;
+                var_bs += diff_bs * diff_bs;
+                var_policy += diff_policy * diff_policy;
+            }
+            double std_bs = std::sqrt(var_bs / test_params.num_paths);
+            double std_policy = std::sqrt(var_policy / test_params.num_paths);
+
+            traj_csv << t << "," << mean_bs << "," << std_bs << "," << mean_policy << "," << std_policy << "\n";
+        }
+        traj_csv.close();
+        std::cout << "exported btc equity trajectories to test_equity_trajectories.csv" << std::endl;
+
+        // write sample individual path trajectories (restored)
+        std::ofstream sample_csv("sample_equity_paths.csv");
+        sample_csv << "path_idx,step,bs_pnl,policy_pnl\n";
+        int num_sample_paths = 20;
+        for (int i = 0; i < num_sample_paths; ++i) {
+            for (int t = 0; t < test_params.num_steps; ++t) {
+                int idx = i * test_params.num_steps + t;
+                sample_csv << i << "," << t << "," << h_test_traj_bs[idx] << "," << h_test_traj_policy[idx] << "\n";
+            }
+        }
+        sample_csv.close();
+        std::cout << "exported 20 sample path equity trajectories to sample_equity_paths.csv" << std::endl;
 
         std::cout << "done!" << std::endl;
 

@@ -154,12 +154,11 @@ int main() {
         AdamParams adam_params;
         adam_params.lr = 0.005f;
 
-        std::cout << "launching generator..." << std::endl;
-        generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params);
-
         std::vector<float> h_payoffs(params.num_paths);
         CUDA_CHECK(cudaMemcpy(h_payoffs.data(), d_payoffs.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
-        double sum_payoffs = std::accumulate(h_payoffs.begin(), h_payoffs.end(), 0.0);
+
+        // compute option price directly from training dataset
+        double sum_payoffs = std::accumulate(train_ds.h_payoffs.begin(), train_ds.h_payoffs.end(), 0.0);
         params.option_price = std::exp(-params.r * params.T) * (sum_payoffs / params.num_paths);
 
         // evaluate Black-Scholes baseline

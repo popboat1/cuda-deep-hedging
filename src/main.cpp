@@ -20,7 +20,7 @@ int main() {
         params.r = 0.05f;
         params.sigma = 0.65f; 
         params.T = 30.0f / (365.0f * 24.0f); // (30 / 8760 years)
-        params.dt = params.T / params.num_steps;
+        params.dt = params.T / (params.num_steps - 1);
         params.K = 100.0f; // strike price (at the money)
         params.cost_ratio = 0.0025f;
 

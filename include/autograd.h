@@ -21,7 +21,11 @@ void bptt_backward_pass(
     const float* d_portfolio_values,
     const MLPWeights& weights,
     MLPGradients& grads,
-    const SimulationParams& params
+    const SimulationParams& params,
+    float var_cutoff = 0.0f,
+    float cvar_alpha = 0.95f,
+    float lambda_cvar = 1.0f,
+    bool use_hybrid = true
 );
 
 #endif

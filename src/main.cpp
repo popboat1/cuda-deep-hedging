@@ -5,6 +5,7 @@
 #include <numeric>
 #include <random>
 #include <filesystem>
+#include <algorithm>
 
 #include "simulation.h"
 #include "mlp.h"
@@ -177,41 +178,65 @@ int main() {
 
         std::cout << "black-scholes baseline MSE loss (" << params.cost_ratio * 10000 << " bps fee): " << bs_mse_loss << std::endl;
 
-        // --- training loop
-        std::cout << "mlp training..." << std::endl;
+        // --- training loop parameters for Hybrid Loss (MSE + Lambda * CVaR)
+        float cvar_alpha = 0.95f;   // 95% CVaR tail level
+        float lambda_cvar = 0.5f;   // CVaR penalty multiplier
+        bool use_hybrid = true;
+
+        std::cout << "mlp training with Hybrid Loss (MSE + " << lambda_cvar << " * 95% CVaR)..." << std::endl;
         int num_epochs = 2000;
         double best_loss = std::numeric_limits<double>::max();
         int best_epoch = 0;
 
         for(int epoch = 1; epoch <= num_epochs; ++epoch){
-            // regenerate market paths each epoch
-            // generate_gbm_paths(d_paths.get(), d_payoffs.get(), d_deltas.get(), params, 1234ULL + epoch);
-
             // forward pass
             forward_pass(d_paths.get(), d_policy_deltas.get(), weights, params);
 
             // portfolio eval
             evaluate_portfolio(d_paths.get(), d_payoffs.get(), d_policy_deltas.get(), d_portfolio_values.get(), params);
 
-            // backprop through time 
-            bptt_backward_pass(d_paths.get(), d_payoffs.get(), d_policy_deltas.get(), d_portfolio_values.get(), weights, grads, params);
+            // copy terminal portfolio values to compute VaR threshold on host
+            CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+
+            // calculate 5th percentile VaR cutoff on host
+            std::vector<float> sorted_v = h_portfolio_values;
+            size_t tail_index = static_cast<size_t>(params.num_paths * (1.0f - cvar_alpha));
+            std::nth_element(sorted_v.begin(), sorted_v.begin() + tail_index, sorted_v.end());
+            float var_cutoff = sorted_v[tail_index];
+
+            // backprop through time with Hybrid Loss
+            bptt_backward_pass(
+                d_paths.get(), d_payoffs.get(), d_policy_deltas.get(), d_portfolio_values.get(), 
+                weights, grads, params, var_cutoff, cvar_alpha, lambda_cvar, use_hybrid
+            );
 
             // adam optim step
             adam_step(weights, grads, adam_state, adam_params);
             adam_params.time_step++;
 
-            if(epoch % 1 == 0 || epoch == num_epochs){
-                // evaluate current epoch loss & perform checkpointing
-                CUDA_CHECK(cudaMemcpy(h_portfolio_values.data(), d_portfolio_values.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+            if(epoch % 10 == 0 || epoch == num_epochs){
+                // compute MSE component
                 double sum_sq_error = 0.0;
                 for (float v : h_portfolio_values) sum_sq_error += (v * v);
-                double policy_mse_loss = sum_sq_error / params.num_paths;
-    
-                // save weight checkpoint if new best loss achieved
-                if (policy_mse_loss < best_loss) {
-                    best_loss = policy_mse_loss;
+                double mse_loss = sum_sq_error / params.num_paths;
+
+                // compute CVaR component
+                double cvar_sum = 0.0;
+                int tail_count = 0;
+                for (float v : h_portfolio_values) {
+                    if (v <= var_cutoff) {
+                        cvar_sum += (-v);
+                        tail_count++;
+                    }
+                }
+                double cvar_loss = (tail_count > 0) ? (cvar_sum / tail_count) : 0.0;
+                double total_hybrid_loss = mse_loss + lambda_cvar * cvar_loss;
+
+                // save weight checkpoint if new best hybrid loss achieved
+                if (total_hybrid_loss < best_loss) {
+                    best_loss = total_hybrid_loss;
                     best_epoch = epoch;
-    
+
                     CUDA_CHECK(cudaMemcpy(best_W1.data(), d_W1.get(), best_W1.size() * sizeof(float), cudaMemcpyDeviceToHost));
                     CUDA_CHECK(cudaMemcpy(best_W2.data(), d_W2.get(), best_W2.size() * sizeof(float), cudaMemcpyDeviceToHost));
                     CUDA_CHECK(cudaMemcpy(best_W3.data(), d_W3.get(), best_W3.size() * sizeof(float), cudaMemcpyDeviceToHost));
@@ -219,14 +244,14 @@ int main() {
                     CUDA_CHECK(cudaMemcpy(best_b2.data(), d_b2.get(), best_b2.size() * sizeof(float), cudaMemcpyDeviceToHost));
                     CUDA_CHECK(cudaMemcpy(best_b3.data(), d_b3.get(), best_b3.size() * sizeof(float), cudaMemcpyDeviceToHost));
                 }
-    
-                std::cout << "epoch [" << epoch << "/" << num_epochs << "] MSE loss: " << policy_mse_loss
-                            << " (best: " << best_loss << " @ epoch " << best_epoch << ")" << std::endl;
+
+                std::cout << "epoch [" << epoch << "/" << num_epochs << "] hybrid loss: " << total_hybrid_loss
+                          << " (MSE: " << mse_loss << ", CVaR: " << cvar_loss << ") best: " << best_loss << " @ epoch " << best_epoch << std::endl;
             }
         }
 
         // restore best weights to device
-        std::cout << "\nrestoring best weights from epoch " << best_epoch << " (best training MSE: " << best_loss << ")..." << std::endl;
+        std::cout << "\nrestoring best weights from epoch " << best_epoch << " (best training hybrid loss: " << best_loss << ")..." << std::endl;
         CUDA_CHECK(cudaMemcpy(d_W1.get(), best_W1.data(), best_W1.size() * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_b1.get(), best_b1.data(), best_b1.size() * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_W2.get(), best_W2.data(), best_W2.size() * sizeof(float), cudaMemcpyHostToDevice));
@@ -312,7 +337,7 @@ int main() {
         traj_csv.close();
         std::cout << "exported btc equity trajectories to test_equity_trajectories.csv" << std::endl;
 
-        // write sample individual path trajectories (restored)
+        // write sample individual path trajectories
         std::ofstream sample_csv("../results/sample_equity_paths.csv");
         sample_csv << "path_idx,step,bs_pnl,policy_pnl\n";
         int num_sample_paths = 20;
@@ -333,4 +358,4 @@ int main() {
     }
 
     return 0;
-} 
+}

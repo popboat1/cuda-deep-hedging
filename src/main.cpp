@@ -183,6 +183,8 @@ int main() {
         float lambda_cvar = 0.5f;   // CVaR penalty multiplier
         bool use_hybrid = true;
 
+        init_optimizer_weights(weights);
+
         std::cout << "mlp training with Hybrid Loss (MSE + " << lambda_cvar << " * 95% CVaR)..." << std::endl;
         int num_epochs = 2000;
         double best_loss = std::numeric_limits<double>::max();

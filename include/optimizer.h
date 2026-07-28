@@ -24,6 +24,9 @@ struct AdamState {
     float* d_vW3; float* d_vb3;
 };
 
+// static device weight pointer initialization
+void init_optimizer_weights(const MLPWeights& weights);
+
 // host wrapper
 void adam_step(
     MLPWeights& weights,

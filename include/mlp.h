@@ -3,7 +3,7 @@
 
 #include "simulation.h"
 
-constexpr int input_dim = 3;
+constexpr int input_dim = 5;
 constexpr int hidden_dim = 32;
 constexpr int output_dim = 1;
 

@@ -1,5 +1,5 @@
-#ifndef PORTFOLIO_H
-#define PORTFOLIO_H
+#ifndef PORTFOLIO_CUH
+#define PORTFOLIO_CUH
 
 #include "simulation.cuh"
 

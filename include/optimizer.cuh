@@ -1,5 +1,5 @@
-#ifndef OPTIMIZER_H
-#define OPTIMIZER_H
+#ifndef OPTIMIZER_CUH
+#define OPTIMIZER_CUH
 
 #include "mlp.cuh"
 #include "autograd.cuh"

@@ -1,5 +1,5 @@
-#ifndef EXPORTER_H
-#define EXPORTER_H
+#ifndef EXPORTER_CUH
+#define EXPORTER_CUH
 
 #include <string>
 #include "mlp.cuh"

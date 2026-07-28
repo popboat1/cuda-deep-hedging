@@ -1,5 +1,5 @@
-#ifndef SIMULATION_H
-#define SIMULATION_H
+#ifndef SIMULATION_CUH
+#define SIMULATION_CUH
 
 #include "cuda_utils.cuh"
 

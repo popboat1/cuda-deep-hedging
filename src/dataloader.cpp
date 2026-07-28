@@ -1,4 +1,4 @@
-#include "dataloader.cuh"
+#include "dataloader.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>

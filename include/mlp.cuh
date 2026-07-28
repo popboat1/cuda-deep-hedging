@@ -1,5 +1,5 @@
-#ifndef MLP_H
-#define MLP_H
+#ifndef MLP_CUH
+#define MLP_CUH
 
 #include "simulation.cuh"
 

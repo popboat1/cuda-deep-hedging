@@ -1,5 +1,5 @@
-#ifndef AUTOGRAD_H
-#define AUTOGRAD_H
+#ifndef AUTOGRAD_CUH
+#define AUTOGRAD_CUH
 
 #include "mlp.cuh"
 #include "simulation.cuh"

@@ -1,7 +1,7 @@
 #ifndef SIMULATION_H
 #define SIMULATION_H
 
-#include "cuda_utils.h"
+#include "cuda_utils.cuh"
 
 // struct for CUDA kernel params
 struct SimulationParams {

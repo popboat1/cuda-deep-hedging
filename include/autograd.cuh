@@ -1,8 +1,8 @@
 #ifndef AUTOGRAD_H
 #define AUTOGRAD_H
 
-#include "mlp.h"
-#include "simulation.h"
+#include "mlp.cuh"
+#include "simulation.cuh"
 
 struct MLPGradients {
     float* d_gW1; // size 32 x 3

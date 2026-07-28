@@ -2,8 +2,8 @@
 #define EXPORTER_H
 
 #include <string>
-#include "mlp.h"
-#include "simulation.h"
+#include "mlp.cuh"
+#include "simulation.cuh"
 
 void export_hedging_surface(
     const std::string& filename,

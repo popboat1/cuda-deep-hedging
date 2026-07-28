@@ -1,7 +1,7 @@
 #ifndef PORTFOLIO_H
 #define PORTFOLIO_H
 
-#include "simulation.h"
+#include "simulation.cuh"
 
 // terminal portfolio evaluation
 void evaluate_portfolio(

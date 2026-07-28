@@ -1,7 +1,7 @@
 #ifndef MLP_H
 #define MLP_H
 
-#include "simulation.h"
+#include "simulation.cuh"
 
 constexpr int input_dim = 5;
 constexpr int hidden_dim = 32;

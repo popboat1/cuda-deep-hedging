@@ -1,8 +1,8 @@
 #ifndef OPTIMIZER_H
 #define OPTIMIZER_H
 
-#include "mlp.h"
-#include "autograd.h"
+#include "mlp.cuh"
+#include "autograd.cuh"
 
 struct AdamParams {
     float lr = 0.001f;        // learning rate

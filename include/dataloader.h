@@ -3,7 +3,7 @@
 
 #include <string>
 #include <vector>
-#include "simulation.h"
+#include "simulation.cuh"
 
 struct RealDataset {
     int num_paths = 0;

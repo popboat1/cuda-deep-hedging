@@ -7,12 +7,12 @@
 #include <filesystem>
 #include <algorithm>
 
-#include "simulation.h"
-#include "mlp.h"
-#include "portfolio.h"
-#include "autograd.h"
-#include "optimizer.h"
-#include "exporter.h"
+#include "simulation.cuh"
+#include "mlp.cuh"
+#include "portfolio.cuh"
+#include "autograd.cuh"
+#include "optimizer.cuh"
+#include "exporter.cuh"
 #include "dataloader.h"
 
 int main() {

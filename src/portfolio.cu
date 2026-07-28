@@ -1,4 +1,4 @@
-#include "portfolio.h"
+#include "portfolio.cuh"
 #include <cmath>
 
 __device__ inline float norm_cdf_dev(float x) {

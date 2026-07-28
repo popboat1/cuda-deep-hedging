@@ -1,4 +1,4 @@
-#include "optimizer.h"
+#include "optimizer.cuh"
 #include <cmath>
 
 // store MLP pointers & hyperparams in constant memory

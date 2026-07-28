@@ -1,5 +1,5 @@
-#include "exporter.h"
-#include "mlp.h"
+#include "exporter.cuh"
+#include "mlp.cuh"
 #include <fstream>
 #include <iostream>
 #include <vector>

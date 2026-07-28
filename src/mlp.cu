@@ -1,4 +1,4 @@
-#include "mlp.h"
+#include "mlp.cuh"
 #include <cmath>
 
 __global__ void forward(

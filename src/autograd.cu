@@ -1,5 +1,5 @@
-#include "autograd.h"
-#include "mlp.h"
+#include "autograd.cuh"
+#include "mlp.cuh"
 #include <cmath>
 
 __device__ inline float signf(float x) {

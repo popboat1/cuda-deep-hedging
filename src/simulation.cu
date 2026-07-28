@@ -1,4 +1,4 @@
-#include "simulation.h"
+#include "simulation.cuh"
 #include <curand_kernel.h>
 
 __global__ void setup_curand_kernel(curandState* states, unsigned long long seed, int num_paths) {

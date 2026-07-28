@@ -8,6 +8,26 @@ __device__ inline float signf(float x) {
     return 0.0f;
 }
 
+// warp reduction using shuffle instructions
+__device__ inline float warpReduceSum(float val) {
+    unsigned int mask = __activemask();
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(mask, val, offset);
+    }
+    return val;
+}
+
+// 
+__device__ inline void warp_atomic_add(float* address, float val) {
+    unsigned int mask = __activemask();
+    val = warpReduceSum(val);
+    int leader = __ffs(mask) - 1;
+    if ((threadIdx.x & 31) == leader) {
+        atomicAdd(address, val);
+    }
+}
+
 __global__ void bptt_backward(
     const float* d_paths,
     const float* d_payoffs,
@@ -148,24 +168,24 @@ __global__ void bptt_backward(
 
             // --- gradient accumulation into shared memory
             // layer 3 grad
-            atomicAdd(&s_gb3[0], d3);
+            warp_atomic_add(&s_gb3[0], d3);
             for (int j = 0; j < hidden_dim; ++j) {
-                atomicAdd(&s_gW3[j], d3 * h2[j]);
+                warp_atomic_add(&s_gW3[j], d3 * h2[j]);
             }
 
             // layer 2 grad
             for (int i = 0; i < hidden_dim; ++i) {
-                atomicAdd(&s_gb2[i], d2[i]);
+                warp_atomic_add(&s_gb2[i], d2[i]);
                 for (int j = 0; j < hidden_dim; ++j) {
-                    atomicAdd(&s_gW2[i * hidden_dim + j], d2[i] * h1[j]);
+                    warp_atomic_add(&s_gW2[i * hidden_dim + j], d2[i] * h1[j]);
                 }
             }
 
             // layer 1 grad
             for (int i = 0; i < hidden_dim; ++i) {
-                atomicAdd(&s_gb1[i], d1[i]);
+                warp_atomic_add(&s_gb1[i], d1[i]);
                 for (int j = 0; j < input_dim; ++j) {
-                    atomicAdd(&s_gW1[i * input_dim + j], d1[i] * x[j]);
+                    warp_atomic_add(&s_gW1[i * input_dim + j], d1[i] * x[j]);
                 }
             }
         }

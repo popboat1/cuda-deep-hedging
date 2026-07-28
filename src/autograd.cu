@@ -94,7 +94,7 @@ __global__ void bptt_backward(
             compute_state_vector(d_paths, t, path_idx, prev_delta, params, x);
 
             // recompute layer 1
-            float h1[32];
+            float h1[hidden_dim];
             for (int i = 0; i < hidden_dim; ++i) {
                 float sum = weights.d_b1[i];
                 for (int j = 0; j < input_dim; ++j) {
@@ -104,7 +104,7 @@ __global__ void bptt_backward(
             }
 
             // recompute layer 2
-            float h2[32];
+            float h2[hidden_dim];
             for (int i = 0; i < hidden_dim; ++i) {
                 float sum = weights.d_b2[i];
                 for (int j = 0; j < hidden_dim; ++j) {
@@ -144,14 +144,14 @@ __global__ void bptt_backward(
             float d3 = dL_ddelta * (delta_t * (1.0f - delta_t));
 
             // hidden layer 2
-            float d2[32];
+            float d2[hidden_dim];
             for (int i = 0; i < hidden_dim; ++i) {
                 float incoming = weights.d_W3[i] * d3;
                 d2[i] = (h2[i] > 0.0f) ? incoming : 0.0f;
             }
 
             // hidden layer 1
-            float d1[32];
+            float d1[hidden_dim];
             for (int i = 0; i < hidden_dim; ++i) {
                 float incoming = 0.0f;
                 for (int j = 0; j < hidden_dim; ++j) {

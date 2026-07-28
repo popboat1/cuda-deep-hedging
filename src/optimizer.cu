@@ -19,13 +19,13 @@ __global__ void adam_update(
 ) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-    constexpr int sz_W1 = hidden_dim * input_dim;   // 160
-    constexpr int sz_b1 = hidden_dim;              // 32
-    constexpr int sz_W2 = hidden_dim * hidden_dim; // 1024
-    constexpr int sz_b2 = hidden_dim;              // 32
-    constexpr int sz_W3 = hidden_dim * output_dim; // 32
-    constexpr int sz_b3 = output_dim;              // 1
-    constexpr int total_params = sz_W1 + sz_b1 + sz_W2 + sz_b2 + sz_W3 + sz_b3; // 1281
+    constexpr int sz_W1 = hidden_dim * input_dim;   
+    constexpr int sz_b1 = hidden_dim;              
+    constexpr int sz_W2 = hidden_dim * hidden_dim; 
+    constexpr int sz_b2 = hidden_dim;              
+    constexpr int sz_W3 = hidden_dim * output_dim; 
+    constexpr int sz_b3 = output_dim;              
+    constexpr int total_params = sz_W1 + sz_b1 + sz_W2 + sz_b2 + sz_W3 + sz_b3; 
 
     if (idx >= total_params) return;
 

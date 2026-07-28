@@ -158,7 +158,8 @@ int main() {
         };
 
         AdamParams adam_params;
-        adam_params.lr = 0.005f;
+        float initial_lr = 0.005f;
+        float min_lr     = 0.0001f;
 
         std::vector<float> h_payoffs(params.num_paths);
         CUDA_CHECK(cudaMemcpy(h_payoffs.data(), d_payoffs.get(), params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
@@ -179,18 +180,22 @@ int main() {
         std::cout << "black-scholes baseline MSE loss (" << params.cost_ratio * 10000 << " bps fee): " << bs_mse_loss << std::endl;
 
         // --- training loop parameters for Hybrid Loss (MSE + Lambda * CVaR)
-        float cvar_alpha = 0.95f;   // 95% CVaR tail level
-        float lambda_cvar = 0.5f;   // CVaR penalty multiplier
+        float cvar_alpha = 0.98f;    //  CVaR tail level
+        float lambda_cvar = 1.25f;   // CVaR penalty multiplier
         bool use_hybrid = true;
 
         init_optimizer_weights(weights);
 
-        std::cout << "mlp training with Hybrid Loss (MSE + " << lambda_cvar << " * 95% CVaR)..." << std::endl;
+        std::cout << "mlp training with Hybrid Loss (MSE + " << lambda_cvar << " * "<< cvar_alpha * 100 << "% CVaR)..." << std::endl;
         int num_epochs = 2000;
         double best_loss = std::numeric_limits<double>::max();
         int best_epoch = 0;
 
         for(int epoch = 1; epoch <= num_epochs; ++epoch){
+            // cosine annealing lr schedule
+            adam_params.lr = min_lr + 0.5f * (initial_lr - min_lr) * 
+                     (1.0f + std::cos(M_PI * epoch / num_epochs));
+
             // forward pass
             forward_pass(d_paths.get(), d_policy_deltas.get(), weights, params);
 
@@ -264,7 +269,7 @@ int main() {
         export_hedging_surface("../results/hedging_surface.csv", weights, params);
 
         // out-of-sample testing
-        std::cout << "\n--- running out-of-sample validation on unseen real btc test paths ---" << std::endl;
+        std::cout << "\n--- running out-of-sample validation on unseen real snp500 test paths ---" << std::endl;
         RealDataset test_ds = load_and_normalize_real_csv("../data/GSPC_test_paths.csv", params);
 
         SimulationParams test_params = params;
@@ -305,7 +310,7 @@ int main() {
             pnl_csv << h_test_bs[i] << "," << h_test_policy[i] << "\n";
         }
         pnl_csv.close();
-        std::cout << "exported btc test PnLs to test_pnl_distribution.csv" << std::endl;
+        std::cout << "exported snp500 test PnLs to test_pnl_distribution.csv" << std::endl;
 
         std::vector<float> h_test_traj_bs(test_elements);
         std::vector<float> h_test_traj_policy(test_elements);
@@ -337,7 +342,7 @@ int main() {
             traj_csv << t << "," << mean_bs << "," << std_bs << "," << mean_policy << "," << std_policy << "\n";
         }
         traj_csv.close();
-        std::cout << "exported btc equity trajectories to test_equity_trajectories.csv" << std::endl;
+        std::cout << "exported snp500 equity trajectories to test_equity_trajectories.csv" << std::endl;
 
         // write sample individual path trajectories
         std::ofstream sample_csv("../results/sample_equity_paths.csv");

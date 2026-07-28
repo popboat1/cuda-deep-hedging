@@ -35,7 +35,7 @@ __global__ void evaluate_grid_kernel(
     float x[5] = { s_ratio, prev_delta_fixed, tau_ratio, 0.0f, params.sigma };
 
     // hidden layer 1
-    float h1[32];
+    float h1[hidden_dim];
     for (int i = 0; i < hidden_dim; ++i) {
         float sum = weights.d_b1[i];
         for (int j = 0; j < input_dim; ++j) {
@@ -45,7 +45,7 @@ __global__ void evaluate_grid_kernel(
     }
 
     // hidden layer 2
-    float h2[32];
+    float h2[hidden_dim];
     for (int i = 0; i < hidden_dim; ++i) {
         float sum = weights.d_b2[i];
         for (int j = 0; j < hidden_dim; ++j) {

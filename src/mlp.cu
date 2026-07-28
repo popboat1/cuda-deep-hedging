@@ -21,8 +21,8 @@ __global__ void forward(
         float x[5];
         compute_state_vector(d_paths, t, path_idx, prev_delta, params, x);
     
-        // hidden layer 1 (3 -> 32 + ReLU)
-        float h1[32];
+        // hidden layer 1 (3 -> hidden_dim + ReLU)
+        float h1[hidden_dim];
         for (int i = 0; i < hidden_dim; ++i){
             float sum = weights.d_b1[i];
             for (int j = 0; j < input_dim; ++j){
@@ -31,8 +31,8 @@ __global__ void forward(
             h1[i] = fmaxf(0.0f, sum); // ReLU
         }
     
-        // hidden layer 2 (32 -> 32 + ReLU)
-        float h2[32];
+        // hidden layer 2 (hidden_dim -> hidden_dim + ReLU)
+        float h2[hidden_dim];
         for (int i = 0; i < hidden_dim; ++i){
             float sum = weights.d_b2[i];
             for(int j = 0; j < hidden_dim; ++j){
@@ -41,7 +41,7 @@ __global__ void forward(
             h2[i] = fmaxf(0.0f, sum); // ReLU
         }
     
-        // output layer (32 -> 1 + sigmoid)
+        // output layer (hidden_dim -> 1 + sigmoid)
         float out = weights.d_b3[0];
         for(int j = 0; j < hidden_dim; ++j){
             out += weights.d_W3[j] * h2[j];

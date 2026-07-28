@@ -4,7 +4,7 @@
 #include "simulation.cuh"
 
 constexpr int input_dim = 5;
-constexpr int hidden_dim = 32;
+constexpr int hidden_dim = 64;
 constexpr int output_dim = 1;
 
 struct MLPWeights{

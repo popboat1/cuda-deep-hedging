@@ -1,6 +1,2 @@
 build/
-*.html
-scripts/
-*.png
-plots/
 results/

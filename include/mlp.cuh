@@ -16,6 +16,16 @@ struct MLPWeights{
     float* d_b3; // size 1
 };
 
+extern __constant__ float c_W1[hidden_dim * input_dim];
+extern __constant__ float c_b1[hidden_dim];
+extern __constant__ float c_W2[hidden_dim * hidden_dim];
+extern __constant__ float c_b2[hidden_dim];
+extern __constant__ float c_W3[hidden_dim * output_dim];
+extern __constant__ float c_b3[output_dim];
+
+// copy weights from global memory to constant memory
+void copy_weights_to_constant(const MLPWeights& weights);
+
 // helper for feature engineering
 __device__ inline void compute_state_vector(
     const float* d_paths,

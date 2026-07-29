@@ -1,10 +1,26 @@
 #include "mlp.cuh"
 #include <cmath>
 
+__constant__ float c_W1[hidden_dim * input_dim];
+__constant__ float c_b1[hidden_dim];
+__constant__ float c_W2[hidden_dim * hidden_dim];
+__constant__ float c_b2[hidden_dim];
+__constant__ float c_W3[hidden_dim * output_dim];
+__constant__ float c_b3[output_dim];
+
+void copy_weights_to_constant(const MLPWeights& weights) {
+    // copy mlp weights to constant memory
+    cudaMemcpyToSymbol(c_W1, weights.d_W1, hidden_dim * input_dim * sizeof(float), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_b1, weights.d_b1, hidden_dim * sizeof(float), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_W2, weights.d_W2, hidden_dim * hidden_dim * sizeof(float), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_b2, weights.d_b2, hidden_dim * sizeof(float), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_W3, weights.d_W3, hidden_dim * output_dim * sizeof(float), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_b3, weights.d_b3, output_dim * sizeof(float), 0, cudaMemcpyDeviceToDevice);
+}
+
 __global__ void forward(
         float* d_paths, 
         float* d_policy_deltas, 
-        MLPWeights weights, 
         SimulationParams params
 ){
     int path_idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -24,9 +40,9 @@ __global__ void forward(
         // hidden layer 1 (3 -> hidden_dim + ReLU)
         float h1[hidden_dim];
         for (int i = 0; i < hidden_dim; ++i){
-            float sum = weights.d_b1[i];
+            float sum = c_b1[i];
             for (int j = 0; j < input_dim; ++j){
-                sum += weights.d_W1[i * input_dim + j] * x[j];
+                sum += c_W1[i * input_dim + j] * x[j];
             }
             h1[i] = fmaxf(0.0f, sum); // ReLU
         }
@@ -34,17 +50,17 @@ __global__ void forward(
         // hidden layer 2 (hidden_dim -> hidden_dim + ReLU)
         float h2[hidden_dim];
         for (int i = 0; i < hidden_dim; ++i){
-            float sum = weights.d_b2[i];
+            float sum = c_b2[i];
             for(int j = 0; j < hidden_dim; ++j){
-                sum += weights.d_W2[i * hidden_dim + j] * h1[j];
+                sum += c_W2[i * hidden_dim + j] * h1[j];
             }
             h2[i] = fmaxf(0.0f, sum); // ReLU
         }
     
         // output layer (hidden_dim -> 1 + sigmoid)
-        float out = weights.d_b3[0];
+        float out = c_b3[0];
         for(int j = 0; j < hidden_dim; ++j){
-            out += weights.d_W3[j] * h2[j];
+            out += c_W3[j] * h2[j];
         }
     
         // sigmoid
@@ -64,10 +80,11 @@ void forward_pass(
     int threads = 256;
     int blocks = cuda_utils::ceil_div(params.num_paths, threads);
 
+    copy_weights_to_constant(weights);
+
     forward<<<blocks, threads>>>(
         d_paths,
         d_policy_deltas,
-        weights,
         params
     );
     CUDA_CHECK_KERNEL();

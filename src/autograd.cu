@@ -33,7 +33,6 @@ __global__ void bptt_backward(
     const float* d_payoffs,
     const float* d_policy_deltas,
     const float* d_portfolio_values,
-    const MLPWeights weights,
     MLPGradients grads,
     const SimulationParams params,
     float var_cutoff,
@@ -68,12 +67,14 @@ __global__ void bptt_backward(
         float V_T = d_portfolio_values[path_idx];
         
         // base MSE gradient active across 100% of paths
+        // compute gradient of mse loss w.r.t terminal portfolio value
         float dL_dV_T = (2.0f / params.num_paths) * V_T;
 
         // add CVaR tail penalty gradient if path falls in worst 5% tail
         if (use_hybrid) {
             float tail_prob = 1.0f - cvar_alpha; // e.g. 0.05
             if (V_T <= var_cutoff) {
+                // add cvar penalty to tail paths
                 dL_dV_T += lambda_cvar * (-1.0f / (params.num_paths * tail_prob));
             }
         }
@@ -96,9 +97,9 @@ __global__ void bptt_backward(
             // recompute layer 1
             float h1[hidden_dim];
             for (int i = 0; i < hidden_dim; ++i) {
-                float sum = weights.d_b1[i];
+                float sum = c_b1[i];
                 for (int j = 0; j < input_dim; ++j) {
-                    sum += weights.d_W1[i * input_dim + j] * x[j];
+                    sum += c_W1[i * input_dim + j] * x[j];
                 }
                 h1[i] = fmaxf(0.0f, sum);
             }
@@ -106,9 +107,9 @@ __global__ void bptt_backward(
             // recompute layer 2
             float h2[hidden_dim];
             for (int i = 0; i < hidden_dim; ++i) {
-                float sum = weights.d_b2[i];
+                float sum = c_b2[i];
                 for (int j = 0; j < hidden_dim; ++j) {
-                    sum += weights.d_W2[i * hidden_dim + j] * h1[j];
+                    sum += c_W2[i * hidden_dim + j] * h1[j];
                 }
                 h2[i] = fmaxf(0.0f, sum);
             }
@@ -137,33 +138,38 @@ __global__ void bptt_backward(
             }
 
             // combined total gradient for delta_t
+            // chain rule for total delta gradient
             float dL_ddelta = (dL_dV_T * dVT_ddelta) + upstream_d_delta;
 
             // --- backpropagation
             // out layer
+            // backprop through sigmoid output layer
             float d3 = dL_ddelta * (delta_t * (1.0f - delta_t));
 
             // hidden layer 2
+            // backprop through relu activation
             float d2[hidden_dim];
             for (int i = 0; i < hidden_dim; ++i) {
-                float incoming = weights.d_W3[i] * d3;
+                float incoming = c_W3[i] * d3;
                 d2[i] = (h2[i] > 0.0f) ? incoming : 0.0f;
             }
 
             // hidden layer 1
+            // backprop through relu activation
             float d1[hidden_dim];
             for (int i = 0; i < hidden_dim; ++i) {
                 float incoming = 0.0f;
                 for (int j = 0; j < hidden_dim; ++j) {
-                    incoming += weights.d_W2[j * hidden_dim + i] * d2[j]; // transpose: W2[j, i]
+                    incoming += c_W2[j * hidden_dim + i] * d2[j]; // transpose: W2[j, i]
                 }
                 d1[i] = (h1[i] > 0.0f) ? incoming : 0.0f;
             }
 
             // compute upstream gradient for prev_delta to pass to step t-1
+            // gradient for previous delta passed backwards
             upstream_d_delta = 0.0f;
             for (int i = 0; i < hidden_dim; ++i) {
-                upstream_d_delta += weights.d_W1[i * input_dim + 1] * d1[i];
+                upstream_d_delta += c_W1[i * input_dim + 1] * d1[i];
             }
 
             // --- gradient accumulation into shared memory
@@ -221,6 +227,6 @@ void bptt_backward_pass(
 
     bptt_backward<<<blocks, threads>>>(
         d_paths, d_payoffs, d_policy_deltas, d_portfolio_values, 
-        weights, grads, params, var_cutoff, cvar_alpha, lambda_cvar, use_hybrid
+        grads, params, var_cutoff, cvar_alpha, lambda_cvar, use_hybrid
     );
 }

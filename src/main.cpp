@@ -305,6 +305,9 @@ int main() {
 
         // write terminal pnls
         std::ofstream pnl_csv("../results/test_pnl_distribution.csv");
+        if (!pnl_csv.is_open()) {
+            throw std::runtime_error("failed to open test_pnl_distribution.csv for writing");
+        }
         pnl_csv << "BS_PnL,Policy_PnL\n";
         for (int i = 0; i < test_params.num_paths; ++i) {
             pnl_csv << h_test_bs[i] << "," << h_test_policy[i] << "\n";
@@ -319,6 +322,9 @@ int main() {
 
         // write mean trajectories
         std::ofstream traj_csv("../results/test_equity_trajectories.csv");
+        if (!traj_csv.is_open()) {
+            throw std::runtime_error("failed to open test_equity_trajectories.csv for writing");
+        }
         traj_csv << "step,bs_mean,bs_std,policy_mean,policy_std\n";
         for (int t = 0; t < test_params.num_steps; ++t) {
             double sum_bs = 0.0, sum_policy = 0.0;
@@ -346,6 +352,9 @@ int main() {
 
         // write sample individual path trajectories
         std::ofstream sample_csv("../results/sample_equity_paths.csv");
+        if (!sample_csv.is_open()) {
+            throw std::runtime_error("failed to open sample_equity_paths.csv for writing");
+        }
         sample_csv << "path_idx,step,bs_pnl,policy_pnl\n";
         int num_sample_paths = 20;
         for (int i = 0; i < num_sample_paths; ++i) {

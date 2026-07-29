@@ -179,6 +179,13 @@ int main() {
 
         std::cout << "black-scholes baseline MSE loss (" << params.cost_ratio * 10000 << " bps fee): " << bs_mse_loss << std::endl;
 
+        // open csv to save training losses
+        std::ofstream loss_csv("../results/training_losses.csv");
+        if (!loss_csv.is_open()) {
+            throw std::runtime_error("failed to open training_losses.csv for writing");
+        }
+        loss_csv << "epoch,train_mse,train_cvar,train_hybrid\n";
+
         // --- training loop parameters for Hybrid Loss (MSE + Lambda * CVaR)
         float cvar_alpha = 0.98f;    //  CVaR tail level
         float lambda_cvar = 1.25f;   // CVaR penalty multiplier
@@ -238,6 +245,9 @@ int main() {
                 }
                 double cvar_loss = (tail_count > 0) ? (cvar_sum / tail_count) : 0.0;
                 double total_hybrid_loss = mse_loss + lambda_cvar * cvar_loss;
+
+                loss_csv << epoch << "," << mse_loss << "," << cvar_loss << "," << total_hybrid_loss << "\n";
+                loss_csv.flush();
 
                 // save weight checkpoint if new best hybrid loss achieved
                 if (total_hybrid_loss < best_loss) {

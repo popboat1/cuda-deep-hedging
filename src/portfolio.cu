@@ -13,19 +13,20 @@ __global__ void compute_portfolio(
     const SimulationParams params
 ){
     int path_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if(path_idx >= params.num_paths) return;
+    if (path_idx >= params.num_paths) return;
 
     // pre-compute contants
     float exp_r_dt = expf(params.r * params.dt);
 
     // inception (t = 0)
     float S0 = d_paths[0 * params.num_paths + path_idx];
-    float d0 = d_deltas[0 * params.num_paths + path_idx];
+    float d0 = (params.num_steps > 1) ? d_deltas[0 * params.num_paths + path_idx] : 0.0f;
     float fee_0 = params.cost_ratio * fabsf(d0) * S0;
     float C = params.option_price - (d0 * S0) - fee_0;
     float prev_delta = d0;
 
-    for(int t = 1; t < params.num_steps; t++){
+    // intermediate rebalancing steps (t = 1 .. num_steps - 2)
+    for (int t = 1; t < params.num_steps - 1; ++t) {
         float S_t = d_paths[t * params.num_paths + path_idx];
         float d_t = d_deltas[t * params.num_paths + path_idx];
 
@@ -35,11 +36,12 @@ __global__ void compute_portfolio(
         prev_delta = d_t;
     }
 
-    // expiry settlement (t = T)
+    // expiry settlement (t = T, no rebalance; accrue final dt and liquidate)
     float S_T = d_paths[(params.num_steps - 1) * params.num_paths + path_idx];
     float payoff = d_payoffs[path_idx];
-    float C_final = C * exp_r_dt;
-    float V_T = C_final + (prev_delta * S_T) - payoff;
+    float C_final = (params.num_steps > 1) ? (C * exp_r_dt) : C;
+    float liquidation_cost = params.cost_ratio * fabsf(prev_delta) * S_T;
+    float V_T = C_final + (prev_delta * S_T) - liquidation_cost - payoff;
 
     d_portfolio_values[path_idx] = V_T;
 }
@@ -63,36 +65,32 @@ __global__ void compute_portfolio_trajectories(
     for (int t = 0; t < params.num_steps; ++t) {
         int curr_idx = t * params.num_paths + path_idx;
         float S_t = d_paths[curr_idx];
-        float delta_t = d_deltas[curr_idx];
-
-        float d_delta = delta_t - prev_delta;
-        float trade_cost = fabsf(d_delta) * S_t * params.cost_ratio;
+        int traj_idx = path_idx * params.num_steps + t;
 
         if (t > 0) {
             cash *= exp_r_dt;
         }
-        cash -= (d_delta * S_t + trade_cost);
 
-        float tau = params.T - (t * params.dt);
-        float option_val = 0.0f;
-
-        int traj_idx = path_idx * params.num_steps + t;
-
-        if (t == params.num_steps - 1 || tau <= 0.0f) {
-            float final_cash = cash * exp_r_dt;
-            float liquidation_cost = fabsf(delta_t) * S_t * params.cost_ratio;
+        if (t == params.num_steps - 1) {
+            // expiry settlement: unwind existing position without rebalancing
+            float liquidation_cost = params.cost_ratio * fabsf(prev_delta) * S_t;
             float payoff = d_payoffs[path_idx];
-            d_trajectories[traj_idx] = final_cash + (delta_t * S_t) - liquidation_cost - payoff;
+            d_trajectories[traj_idx] = cash + (prev_delta * S_t) - liquidation_cost - payoff;
         } else {
+            float delta_t = d_deltas[curr_idx];
+            float d_delta = delta_t - prev_delta;
+            float trade_cost = params.cost_ratio * fabsf(d_delta) * S_t;
+            cash -= (d_delta * S_t + trade_cost);
+
+            float tau = params.T - (t * params.dt);
             float d1 = (logf(S_t / params.K) + (params.r + 0.5f * sigma_sq) * tau) / (params.sigma * sqrtf(tau));
             float d2 = d1 - params.sigma * sqrtf(tau);
-            option_val = S_t * norm_cdf_dev(d1) - params.K * expf(-params.r * tau) * norm_cdf_dev(d2);
+            float option_val = S_t * norm_cdf_dev(d1) - params.K * expf(-params.r * tau) * norm_cdf_dev(d2);
 
             // net mark-to-market portfolio value
             d_trajectories[traj_idx] = cash + (delta_t * S_t) - option_val;
+            prev_delta = delta_t;
         }
-
-        prev_delta = delta_t;
     }
 }
 
@@ -113,6 +111,7 @@ void evaluate_portfolio(
         d_portfolio_values,
         params
     );
+    CUDA_CHECK_KERNEL();
 }
 
 void evaluate_portfolio_trajectories(

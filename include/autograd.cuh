@@ -1,17 +1,45 @@
 #ifndef AUTOGRAD_CUH
 #define AUTOGRAD_CUH
 
+#include <vector>
 #include "mlp.cuh"
 #include "simulation.cuh"
 
 struct MLPGradients {
-    float* d_gW1; // size 32 x 3
-    float* d_gb1; // size 32
-    float* d_gW2; // size 32 x 32
-    float* d_gb2; // size 32
-    float* d_gW3; // size 1 x 32
-    float* d_gb3; // size 1
+    float* d_gW1; // size hidden_dim x input_dim
+    float* d_gb1; // size hidden_dim
+    float* d_gW2; // size hidden_dim x hidden_dim
+    float* d_gb2; // size hidden_dim
+    float* d_gW3; // size output_dim x hidden_dim
+    float* d_gb3; // size output_dim
 };
+
+enum class HedgingLossType {
+    CenteredVarCvar = 0,
+    EntropicRisk = 1
+};
+
+struct HedgingLossStats {
+    double variance = 0.0;        // centered variance E[(V - mean)^2]
+    double ru_cvar = 0.0;         // smooth Rockafellar-Uryasev CVaR of -(V - mean)
+    double entropic_risk = 0.0;   // (1 / gamma) * log E[exp(-gamma * V)]
+    double total_loss = 0.0;      // active objective value
+    float mean_v = 0.0f;          // sample mean E[V]
+    float nu_star = 0.0f;         // optimal RU threshold on centered losses
+    float mean_phi_prime = 0.0f;  // mean smooth hinge derivative for centering
+    float log_normalizer = 0.0f;  // log(sum_i exp(-gamma * V_i)) for entropic weights
+};
+
+// compute hedging loss statistics and auxiliary scalar multipliers
+HedgingLossStats compute_hedging_loss_stats(
+    const std::vector<float>& portfolio_values,
+    float cvar_alpha = 0.95f,
+    float cvar_eps = 0.02f,
+    float lambda_cvar = 1.0f,
+    bool use_hybrid = true,
+    HedgingLossType loss_type = HedgingLossType::EntropicRisk,
+    float risk_aversion = 4.0f
+);
 
 // host wrapper
 void bptt_backward_pass(
@@ -22,10 +50,13 @@ void bptt_backward_pass(
     const MLPWeights& weights,
     MLPGradients& grads,
     const SimulationParams& params,
-    float var_cutoff = 0.0f,
+    const HedgingLossStats& loss_stats,
     float cvar_alpha = 0.95f,
+    float cvar_eps = 0.02f,
     float lambda_cvar = 1.0f,
-    bool use_hybrid = true
+    bool use_hybrid = true,
+    HedgingLossType loss_type = HedgingLossType::EntropicRisk,
+    float risk_aversion = 4.0f
 );
 
 #endif

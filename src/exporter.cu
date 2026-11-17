@@ -31,8 +31,9 @@ __global__ void evaluate_grid_kernel(
     float S = s_ratio * params.K;
     float tau = tau_ratio * params.T;
 
-    // evaluated at baseline momentum (r_t = 0.0) and baseline vol (sigma)
-    float x[5] = { s_ratio, prev_delta_fixed, tau_ratio, 0.0f, params.sigma };
+    // evaluated at baseline return (r_t = 0.0) and baseline vol (sigma)
+    float x[5];
+    normalize_state_features(S, prev_delta_fixed, tau, 0.0f, params.sigma, params, x);
 
     // hidden layer 1
     float h1[hidden_dim];
@@ -86,7 +87,10 @@ void export_hedging_surface(
     int num_tau_points
 ) {
     int total_points = num_s_points * num_tau_points;
-    float s_min = 0.70f, s_max = 1.30f;
+    float total_vol = params.sigma * std::sqrt(params.T);
+    float s_span = std::fmin(0.30f, std::fmax(0.06f, 4.0f * total_vol));
+    float s_min = 1.0f - s_span;
+    float s_max = 1.0f + s_span;
     float tau_min = 0.01f, tau_max = 1.00f;
 
     auto d_grid_s = cuda_utils::make_device_buffer<float>(total_points);

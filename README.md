@@ -64,17 +64,3 @@ All PnL figures below are in normalized contract units (`S0 = K = 100`); `analys
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **10 bps fee** | Black-Scholes Delta | -0.2799 | 0.4544 | 0.2065 | 0.5545 |
 | **10 bps fee** | Deep Hedging Policy | -0.2659 | 0.4640 | 0.2153 | 0.5345 |
-
-## Visualizations
-
-### Full Equity Curve Comparison
-![Full Equity Curve Comparison](plots/full_equity_curve_comparison.png)
-
-### PnL Trajectory Analysis
-![PnL Trajectory Analysis](plots/pnl_trajectory_analysis.png)
-
-### Hedging Surface 3D
-![Hedging Surface 3D](plots/hedging_surface_3d.png)
-
-### Training & Validation Losses
-![Training Losses](plots/training_losses_curve.png)

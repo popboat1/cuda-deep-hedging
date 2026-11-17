@@ -59,8 +59,9 @@ HedgingLossStats compute_hedging_loss_stats(
     }
     double mean_v = sum_v * inv_n;
 
+    bool center_cvar_losses = (loss_type != HedgingLossType::MeanVarCvar);
     double sum_sq = 0.0;
-    std::vector<double> centered_losses(n);
+    std::vector<double> cvar_losses(n);
     double min_l = std::numeric_limits<double>::max();
     double max_l = std::numeric_limits<double>::lowest();
     double max_neg_gamma_v = std::numeric_limits<double>::lowest();
@@ -70,8 +71,8 @@ HedgingLossStats compute_hedging_loss_stats(
         double v_i = static_cast<double>(portfolio_values[i]);
         double v_tilde = v_i - mean_v;
         sum_sq += v_tilde * v_tilde;
-        double loss_i = -v_tilde;
-        centered_losses[i] = loss_i;
+        double loss_i = center_cvar_losses ? (-v_tilde) : (-v_i);
+        cvar_losses[i] = loss_i;
         min_l = std::min(min_l, loss_i);
         max_l = std::max(max_l, loss_i);
         max_neg_gamma_v = std::max(max_neg_gamma_v, -gamma * v_i);
@@ -99,7 +100,7 @@ HedgingLossStats compute_hedging_loss_stats(
 
         auto mean_smooth_exceedance = [&](double nu) {
             double s = 0.0;
-            for (double loss_i : centered_losses) {
+            for (double loss_i : cvar_losses) {
                 double u = (loss_i - nu + 0.5 * eps) / eps;
                 double p = std::min(1.0, std::max(0.0, u));
                 s += p;
@@ -120,7 +121,7 @@ HedgingLossStats compute_hedging_loss_stats(
         double sum_psi = 0.0;
         double sum_phi_prime = 0.0;
 
-        for (double loss_i : centered_losses) {
+        for (double loss_i : cvar_losses) {
             double z = loss_i - nu_star;
             double u = z + 0.5 * eps;
             double phi_prime = std::min(1.0, std::max(0.0, u / eps));
@@ -200,13 +201,17 @@ __global__ void bptt_backward(
             // centered variance gradient
             dL_dV_T = (2.0f / n_paths) * v_tilde;
 
-            // smooth centered Rockafellar-Uryasev CVaR gradient
             if (use_hybrid && lambda_cvar > 0.0f) {
-                float z = -v_tilde - loss_stats.nu_star;
+                bool is_mean_var_cvar = (loss_type_int == static_cast<int>(HedgingLossType::MeanVarCvar));
+                float loss_i = is_mean_var_cvar ? (-V_T) : (-v_tilde);
+                float z = loss_i - loss_stats.nu_star;
                 float u = (z + 0.5f * cvar_eps) / cvar_eps;
                 float phi_prime = fminf(1.0f, fmaxf(0.0f, u));
                 float tail_scale = lambda_cvar / (n_paths * (1.0f - cvar_alpha));
-                dL_dV_T -= tail_scale * (phi_prime - loss_stats.mean_phi_prime);
+
+                // uncentered RU-CVaR penalizes transaction fee bleed while remaining cash-invariant
+                float cvar_term = is_mean_var_cvar ? phi_prime : (phi_prime - loss_stats.mean_phi_prime);
+                dL_dV_T -= tail_scale * cvar_term;
             }
         }
     }

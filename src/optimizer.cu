@@ -10,7 +10,7 @@ void init_optimizer_weights(const MLPWeights& weights) {
     CUDA_CHECK(cudaMemcpyToSymbol(c_weights, &weights, sizeof(MLPWeights)));
 }
 
-// generic element-wise Adam kernel
+// generic element-wise AdamW kernel
 __global__ void adam_update(
     MLPGradients grads,
     AdamState state,
@@ -19,13 +19,13 @@ __global__ void adam_update(
 ) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-    constexpr int sz_W1 = hidden_dim * input_dim;   
-    constexpr int sz_b1 = hidden_dim;              
-    constexpr int sz_W2 = hidden_dim * hidden_dim; 
-    constexpr int sz_b2 = hidden_dim;              
-    constexpr int sz_W3 = hidden_dim * output_dim; 
-    constexpr int sz_b3 = output_dim;              
-    constexpr int total_params = sz_W1 + sz_b1 + sz_W2 + sz_b2 + sz_W3 + sz_b3; 
+    constexpr int sz_W1 = hidden_dim * input_dim;
+    constexpr int sz_b1 = hidden_dim;
+    constexpr int sz_W2 = hidden_dim * hidden_dim;
+    constexpr int sz_b2 = hidden_dim;
+    constexpr int sz_W3 = hidden_dim * output_dim;
+    constexpr int sz_b3 = output_dim;
+    constexpr int total_params = sz_W1 + sz_b1 + sz_W2 + sz_b2 + sz_W3 + sz_b3;
 
     if (idx >= total_params) return;
 
@@ -33,6 +33,7 @@ __global__ void adam_update(
     float* grad  = nullptr;
     float* m     = nullptr;
     float* v     = nullptr;
+    bool is_weight_matrix = false;
 
     // map thread index to parameter pointers stored in __constant__ memory
     if (idx < sz_W1) {
@@ -41,6 +42,7 @@ __global__ void adam_update(
         grad  = grads.d_gW1 + offset;
         m     = state.d_mW1 + offset;
         v     = state.d_vW1 + offset;
+        is_weight_matrix = true;
     } else if (idx < sz_W1 + sz_b1) {
         int offset = idx - sz_W1;
         param = c_weights.d_b1 + offset;
@@ -53,6 +55,7 @@ __global__ void adam_update(
         grad  = grads.d_gW2 + offset;
         m     = state.d_mW2 + offset;
         v     = state.d_vW2 + offset;
+        is_weight_matrix = true;
     } else if (idx < sz_W1 + sz_b1 + sz_W2 + sz_b2) {
         int offset = idx - (sz_W1 + sz_b1 + sz_W2);
         param = c_weights.d_b2 + offset;
@@ -65,6 +68,7 @@ __global__ void adam_update(
         grad  = grads.d_gW3 + offset;
         m     = state.d_mW3 + offset;
         v     = state.d_vW3 + offset;
+        is_weight_matrix = true;
     } else {
         int offset = idx - (sz_W1 + sz_b1 + sz_W2 + sz_b2 + sz_W3);
         param = c_weights.d_b3 + offset;
@@ -86,9 +90,14 @@ __global__ void adam_update(
 
     float m_hat = m_val / bias_corr1;
     float v_hat = v_val / bias_corr2;
-    
-    // update model weight in global memory
-    *param -= c_adam_params.lr * m_hat / (sqrtf(v_hat) + c_adam_params.epsilon);
+
+    float w_val = *param;
+    float decay = (is_weight_matrix && c_adam_params.weight_decay > 0.0f)
+                  ? (c_adam_params.weight_decay * w_val)
+                  : 0.0f;
+
+    // update model weight with decoupled weight decay
+    *param = w_val - c_adam_params.lr * (m_hat / (sqrtf(v_hat) + c_adam_params.epsilon) + decay);
 
     // zero grad
     *grad = 0.0f;
@@ -100,7 +109,7 @@ void adam_step(
     AdamState& state,
     AdamParams& params
 ) {
-    // copy weight descriptors and Adam prams into constant memory
+    // copy weight descriptors and Adam params into constant memory
     CUDA_CHECK(cudaMemcpyToSymbol(c_adam_params, &params, sizeof(AdamParams)));
 
     // pre-calculate bias correction denominators
@@ -109,7 +118,7 @@ void adam_step(
     constexpr int total_params = (hidden_dim * input_dim) + hidden_dim +
                                  (hidden_dim * hidden_dim) + hidden_dim +
                                  (hidden_dim * output_dim) + output_dim;
-    
+
     int threads = 256;
     int blocks = cuda_utils::ceil_div(total_params, threads);
 

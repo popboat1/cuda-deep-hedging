@@ -5,11 +5,12 @@
 #include "autograd.cuh"
 
 struct AdamParams {
-    float lr = 0.001f;        // learning rate
-    float beta1 = 0.9f;       // exponential decay rate for 1st moment
-    float beta2 = 0.999f;     // exponential decay rate for 2nd moment
-    float epsilon = 1e-8f;    // numerical stability constant
-    int time_step = 1;        // Adam iteration counter (t >= 1)
+    float lr = 0.001f;          // learning rate
+    float beta1 = 0.9f;         // exponential decay rate for 1st moment
+    float beta2 = 0.999f;       // exponential decay rate for 2nd moment
+    float epsilon = 1e-8f;      // numerical stability constant
+    float weight_decay = 0.0f;  // decoupled L2 weight decay applied to weight matrices
+    int time_step = 1;          // Adam iteration counter (t >= 1)
 };
 
 struct AdamState {

@@ -251,8 +251,14 @@ int main() {
         bool use_hybrid = true;
         float risk_aversion = 4.0f;
 
-        for (HedgingLossType loss_type : {HedgingLossType::CenteredVarCvar, HedgingLossType::EntropicRisk}) {
-            const char* tag = (loss_type == HedgingLossType::EntropicRisk) ? "entropic" : "centered";
+        for (HedgingLossType loss_type : {
+                 HedgingLossType::CenteredVarCvar,
+                 HedgingLossType::EntropicRisk,
+                 HedgingLossType::MeanVarCvar
+             }) {
+            const char* tag = (loss_type == HedgingLossType::EntropicRisk)
+                                  ? "entropic"
+                                  : ((loss_type == HedgingLossType::MeanVarCvar) ? "meanvar" : "centered");
 
             zero_grads();
             forward_pass(d_paths.get(), d_policy_deltas.get(), weights, p);
@@ -301,9 +307,12 @@ int main() {
             float gb3_shifted = 0.0f;
             CUDA_CHECK(cudaMemcpy(&gb3_shifted, d_gb3.get(), sizeof(float), cudaMemcpyDeviceToHost));
 
-            double expected_loss = (loss_type == HedgingLossType::EntropicRisk)
-                                   ? (stats.total_loss - static_cast<double>(shift) * std::exp(p.r * p.T))
-                                   : stats.total_loss;
+            double expected_loss = stats.total_loss;
+            if (loss_type == HedgingLossType::EntropicRisk) {
+                expected_loss = stats.total_loss - static_cast<double>(shift) * std::exp(p.r * p.T);
+            } else if (loss_type == HedgingLossType::MeanVarCvar) {
+                expected_loss = stats.total_loss - static_cast<double>(lambda_cvar) * static_cast<double>(shift) * std::exp(p.r * p.T);
+            }
             if (std::fabs(expected_loss - shifted_stats.total_loss) > 1e-4) {
                 std::cerr << "FAIL [shift_invariance loss " << tag << "]: expected " << expected_loss
                           << " vs " << shifted_stats.total_loss << "\n";

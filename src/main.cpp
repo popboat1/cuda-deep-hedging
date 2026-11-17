@@ -82,23 +82,41 @@ DeviceDatasetBuffers generate_sim_dataset(const SimulationParams& base_params, i
 int main(int argc, char** argv) {
     try {
         bool sim_mode = false;
+        bool skip_test = false;
         float custom_cost_ratio = 0.0010f;
-        HedgingLossType loss_type = HedgingLossType::EntropicRisk;
-        float risk_aversion = 4.0f;
+        HedgingLossType loss_type = HedgingLossType::MeanVarCvar;
+        float risk_aversion = 2.0f;
+        float lambda_cvar = 0.25f;
+        float weight_decay = 0.05f;
+        float initial_lr = 0.0005f;
 
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--sim") {
                 sim_mode = true;
+            } else if (arg == "--skip-test") {
+                skip_test = true;
             } else if (arg == "--no-cost") {
                 custom_cost_ratio = 0.0f;
             } else if (arg == "--cost" && i + 1 < argc) {
                 custom_cost_ratio = std::stof(argv[++i]);
             } else if (arg == "--loss" && i + 1 < argc) {
                 std::string lstr = argv[++i];
-                loss_type = (lstr == "centered") ? HedgingLossType::CenteredVarCvar : HedgingLossType::EntropicRisk;
+                if (lstr == "centered") {
+                    loss_type = HedgingLossType::CenteredVarCvar;
+                } else if (lstr == "entropic") {
+                    loss_type = HedgingLossType::EntropicRisk;
+                } else {
+                    loss_type = HedgingLossType::MeanVarCvar;
+                }
             } else if (arg == "--gamma" && i + 1 < argc) {
                 risk_aversion = std::stof(argv[++i]);
+            } else if (arg == "--lambda" && i + 1 < argc) {
+                lambda_cvar = std::stof(argv[++i]);
+            } else if (arg == "--wd" && i + 1 < argc) {
+                weight_decay = std::stof(argv[++i]);
+            } else if (arg == "--lr" && i + 1 < argc) {
+                initial_lr = std::stof(argv[++i]);
             }
         }
 
@@ -270,12 +288,11 @@ int main(int argc, char** argv) {
         };
 
         AdamParams adam_params;
-        float initial_lr = 0.0015f;
+        adam_params.weight_decay = weight_decay;
         float min_lr = 0.00005f;
 
         float cvar_alpha = 0.95f;
         float cvar_eps = 0.02f;
-        float lambda_cvar = 0.50f;
         bool use_hybrid = true;
 
         // evaluate Black-Scholes baseline on train and validation splits
@@ -314,10 +331,14 @@ int main(int argc, char** argv) {
         init_optimizer_weights(weights);
 
         if (loss_type == HedgingLossType::EntropicRisk) {
-            std::cout << "training MLP with cash-invariant entropic risk (gamma=" << risk_aversion << ")..." << std::endl;
+            std::cout << "training MLP with cash-invariant entropic risk (gamma=" << risk_aversion
+                      << ", wd=" << weight_decay << ")..." << std::endl;
+        } else if (loss_type == HedgingLossType::MeanVarCvar) {
+            std::cout << "training MLP with cash-invariant MeanVarCvar (Var + " << lambda_cvar
+                      << " * smooth RU-CVaR@" << cvar_alpha * 100 << "%, wd=" << weight_decay << ")..." << std::endl;
         } else {
-            std::cout << "training MLP with shift-invariant loss (Var + " << lambda_cvar
-                      << " * smooth RU-CVaR@" << cvar_alpha * 100 << "%)..." << std::endl;
+            std::cout << "training MLP with shift-invariant CenteredVarCvar (Var + " << lambda_cvar
+                      << " * smooth RU-CVaR@" << cvar_alpha * 100 << "%, wd=" << weight_decay << ")..." << std::endl;
         }
 
         int num_epochs = 2000;
@@ -401,6 +422,32 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(d_b2.get(), best_b2.data(), best_b2.size() * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_W3.get(), best_W3.data(), best_W3.size() * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_b3.get(), best_b3.data(), best_b3.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+        // summarize held-out validation performance at restored checkpoint
+        forward_pass(val_buf.d_paths.get(), val_buf.d_policy_deltas.get(), weights, val_buf.params);
+        evaluate_portfolio(
+            val_buf.d_paths.get(), val_buf.d_payoffs.get(), val_buf.d_policy_deltas.get(),
+            val_buf.d_portfolio.get(), val_buf.params
+        );
+        CUDA_CHECK(cudaMemcpy(h_val_portfolio.data(), val_buf.d_portfolio.get(),
+                              val_buf.params.num_paths * sizeof(float), cudaMemcpyDeviceToHost));
+        HedgingLossStats policy_val_stats = compute_hedging_loss_stats(
+            h_val_portfolio, cvar_alpha, cvar_eps, lambda_cvar, use_hybrid, loss_type, risk_aversion
+        );
+        std::cout << "val BS      | mean=" << bs_val_stats.mean_v
+                  << ", std=" << std::sqrt(bs_val_stats.variance)
+                  << ", var=" << bs_val_stats.variance
+                  << ", cvar=" << bs_val_stats.ru_cvar
+                  << ", loss=" << bs_val_stats.total_loss << std::endl;
+        std::cout << "val Policy  | mean=" << policy_val_stats.mean_v
+                  << ", std=" << std::sqrt(policy_val_stats.variance)
+                  << ", var=" << policy_val_stats.variance
+                  << ", cvar=" << policy_val_stats.ru_cvar
+                  << ", loss=" << policy_val_stats.total_loss << std::endl;
+
+        if (skip_test) {
+            return 0;
+        }
 
         export_hedging_surface("../results/hedging_surface.csv", weights, params);
 

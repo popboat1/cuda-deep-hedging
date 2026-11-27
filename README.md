@@ -1,101 +1,102 @@
 # cuda deep hedging
 
-A CUDA implementation of a neural network hedger trained with Backpropagation Through Time (BPTT) to hedge an at-the-money European call option under transaction costs, compared against a Black-Scholes delta baseline.
+A CUDA C++17 implementation of Buehler et al. (2019) Deep Hedging for European call options under discrete rebalancing, proportional transaction costs, and stochastic volatility, compared against Black-Scholes delta hedging across 100,000 held-out simulated paths.
 
 ## Why
 
-Black-Scholes delta hedging assumes continuous, frictionless trading. With discrete rebalancing and proportional transaction fees (10 bps), chasing every price move can get expensive near expiry. The goal of this project is to implement the full simulation, forward pass, portfolio accounting, BPTT backward pass, and AdamW optimizer directly in CUDA, verify that the neural hedger recovers Black-Scholes in a frictionless simulated market, and test honestly how it holds up on real S&P 500 data.
+Black-Scholes delta hedging assumes continuous, frictionless trading and constant volatility. Under discrete daily rebalancing and proportional fees (`10–50 bps`), chasing every spot move erodes returns near the strike, while under correlated stochastic volatility (Heston), plug-in Black-Scholes misses the leverage-driven variance-return correlation (`rho = -0.70`). This project implements the GPU Monte Carlo path generator (GBM and Heston), forward policy evaluation, portfolio accounting, Backpropagation Through Time (BPTT) with full-mask warp reductions, and decoupled AdamW directly in custom CUDA kernels.
 
 ## How it works
 
-The model is a small 2-hidden-layer MLP (5 normalized inputs -> 64 -> 64 -> 1 sigmoid delta) evaluated across 29 rebalancing steps (`num_steps = 30`, no trading at expiry). Every step accrues cash at the risk-free rate, updates the hedge position, pays a 10 bps fee on position changes, and unwinds any remaining shares at expiry against the option payoff. Initial option prices use the analytical Black-Scholes formula so day-0 mark-to-market starts cleanly at the opening trade fee.
+Each run simulates `131,072` training paths, `32,768` validation paths, and `100,000` independent test paths over a 30-day call horizon (`S0 = 100`, `K = 100`, `r = 0.05`, `T = 30/252` years, `num_steps = 30`). Two market dynamics are supported:
 
-For real-market testing, `scripts/fetch_data.py` downloads 1-hour S&P 500 (`^GSPC`) bars (`5,007` bars over 720 days, about 7 bars per trading day) and splits the series chronologically before building windows, leaving a 30-bar gap between splits so nothing overlaps: 2,975 training windows, 692 validation windows (used to pick the best checkpoint), and 40 non-overlapping test horizons (`S0 = K = 100` normalized, actual index levels `$6,413–$7,796`). Annualized volatility (`sigma = 0.1623`) is estimated strictly from the training split.
+- **GBM** (`sigma = 0.20`): analytical Black-Scholes call price (`C0`) and exact analytical Black-Scholes delta benchmark.
+- **Heston** (`v0 = 0.04`, `theta = 0.04`, `kappa = 2.0`, `xi = 0.50`, `rho = -0.70`): Full Truncation Euler (`v_pos = max(v, 0)`) with `8` substeps per daily step, `C0` calibrated on an independent `200,000`-path risk-neutral Monte Carlo draw (`3.0186`), and plug-in Black-Scholes delta evaluated at instantaneous volatility `sqrt(v_pos)`.
 
-Training minimizes terminal PnL variance plus a `0.25` weight on smooth 95% tail loss (CVaR), using AdamW (`lr = 0.0005`, weight decay `0.05`). Because the tail term is evaluated on uncentered PnL, the network pays for trading fees instead of churning, and its gradients stay invariant to shifts in the starting option price (though on real equity data it is not strictly drift-free).
+The hedging policy is a 2-hidden-layer MLP (`5 -> 32 -> 32 -> 1` ReLU/sigmoid) taking normalized log-moneyness, prior delta, remaining time fraction `tau / T`, instantaneous volatility `sqrt(v_pos)`, and current `log(S_t / K)` slope context. Every step accrues cash across 29 rebalancing intervals (`r * dt`), charges proportional transaction fees (`--cost`), and settles remaining shares against the option payoff at expiry. Training minimizes terminal PnL variance plus `--lambda` weighted smooth Rockafellar-Uryasev 95% CVaR (`meanvar` default; `centered` and `entropic` also supported) using AdamW (`lr = 0.0020`, default weight decay `1e-4`; sweeps below run `400` epochs at `lr = 0.003`).
 
 ## Build and run
 
 ```bash
-# 1. fetch ^GSPC 1-hour data and build train/val/test splits
-python scripts/fetch_data.py
-
-# 2. build (Release -O3 by default) and run tests
 mkdir -p build && cd build
 cmake ..
 make -j
 ctest --output-on-failure
 
-# 3. train and evaluate on S&P 500
-./deep_hedger
+# 100k OOS runs (defaults: 131072 train / 32768 val / 100000 test, 400 epochs)
+./deep_hedger --model gbm --cost 0.0 --lambda 0.0 --wd 0.0 --lr 0.003
+./deep_hedger --model gbm --cost 0.0025 --lambda 0.25 --wd 1e-4 --lr 0.003
+./deep_hedger --model heston --cost 0.0025 --lambda 0.25 --wd 1e-4 --lr 0.003
 
-# optional: simulated GBM checks (10 bps fee, or 0 bps convergence check)
-# ./deep_hedger --sim
-# ./deep_hedger --sim --no-cost
-# ./deep_hedger --sim --no-cost --lambda 0
-
-# 4. print metrics and regenerate plots
+# generate plots from results/
 cd .. && python scripts/analysis.py
 ```
 
-## Results
+Supported CLI flags: `--model gbm|heston`, `--train-paths`, `--val-paths`, `--test-paths`, `--cost`, `--lambda`, `--epochs`, `--lr`, `--wd`, `--seed`, `--loss meanvar|centered|entropic`, `--gamma`.
 
-### Simulated GBM check (`N = 8,192` test paths, `sigma = 0.20`, `T = 29/252` yr)
+## Performance
 
-With 0 bps fees, Black-Scholes is the exact ground truth. Both strategies finish with mean PnL near zero, and the neural policy converges closely to the analytical Black-Scholes delta surface (mean absolute difference `0.0114` for pure variance, `0.0136` with the tail penalty). With 10 bps fees, the policy trades slightly higher variance for lower fee drag and lower overall loss.
+Measured on an NVIDIA GeForce RTX 3050 Laptop GPU (`4 GB` VRAM, SM 8.6, FP32 SoA layout):
 
-| Setting | Strategy | Mean PnL | Std Dev | Variance | Loss | Surface MAE vs BS |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 0 bps (`--no-cost --lambda 0`) | Black-Scholes Delta | -0.0017 | 0.4368 | 0.1908 | 0.1908 | — |
-| 0 bps (`--no-cost --lambda 0`) | Deep Hedging Policy | -0.0021 | 0.4507 | 0.2032 | 0.2032 | 0.0114 |
-| 0 bps (`--no-cost`) | Black-Scholes Delta | -0.0017 | 0.4368 | 0.1908 | 0.4493 | — |
-| 0 bps (`--no-cost`) | Deep Hedging Policy | -0.0013 | 0.4558 | 0.2077 | 0.4564 | 0.0136 |
-| 10 bps (`--sim`) | Black-Scholes Delta | -0.2799 | 0.4544 | 0.2065 | 0.5545 | — |
-| 10 bps (`--sim`) | Deep Hedging Policy | -0.2659 | 0.4640 | 0.2153 | 0.5345 | — |
+- Peak device allocation delta (`cudaMemGetInfo`): `134.0 MB` for the full `131,072` train + `32,768` val + `100,000` test pipeline
+- Training throughput (`cudaEventRecord`): `168.89–181.88 ms/epoch`, or `20.90–22.51 M paths*steps/sec`
 
-### Out-of-sample S&P 500 (`N = 40` non-overlapping horizons, 10 bps fee)
+## Out-of-sample results (`N = 100,000` test paths)
 
-PnL values are in normalized units (`S0 = K = 100`).
+### GBM sweep (`400` epochs, `lr = 0.003`)
 
-| Metric | Black-Scholes Delta | Deep Hedging Policy |
-| :--- | :--- | :--- |
-| Mean PnL | -0.0595 | -0.0679 |
-| Median PnL | -0.0485 | -0.0150 |
-| Std Dev | 0.3677 | 0.3971 |
-| Variance | 0.1352 | 0.1577 |
-| Sharpe Ratio | -0.1617 | -0.1710 |
-| Sortino Ratio | -0.1314 | -0.1414 |
-| Win Rate (%) | 45.0000 | 47.5000 |
-| 95% VaR | -0.5129 | -0.9073 |
-| 95% CVaR | -1.1380 | -1.0186 |
-| 99% VaR | -1.2729 | -1.0408 |
-| 99% CVaR | -1.7513 | -1.1195 |
-| Objective Loss | 0.4198 | 0.4125 |
-| Mean MSE | 0.1387 | 0.1623 |
-| Max Trajectory DD | -0.0626 | -0.0813 |
+At `0 bps` (`--lambda 0 --wd 0`), the policy matches the analytical Black-Scholes delta grid with `Surface MAE = 0.0159` and `RMSE = 0.0251`. As transaction fees rise from `10` to `50 bps` (`--lambda 0.25 --wd 1e-4`), the policy reduces trading turnover and beats Black-Scholes on both 95% CVaR and mean PnL.
 
-On the 692 validation windows (`best_epoch = 110`), the neural policy beat Black-Scholes cleanly (std `0.2924` vs `0.3423`, loss `0.2349` vs `0.4012`). On the 40 unseen non-overlapping test horizons, the picture is mixed and heavily shaped by sample size. The policy's better 95%/99% CVaR comes almost entirely from a single selloff horizon (`idx = 38`, a `-2.77%` drop where Black-Scholes lost `-1.7513` and the policy lost `-1.1195`). Without that one horizon, Black-Scholes is ahead on the other 39 horizons (`mean -0.0161` vs `-0.0410`, `std 0.2518` vs `0.3642`, `95% CVaR -0.5185` vs `-0.9121`).
+| Cost (bps) | Strategy | Mean PnL | Std Dev | Variance | 95% CVaR | Turnover (shares) |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| 0 | BS Delta | 0.0033 | 0.4340 | 0.1883 | 1.0004 | 2.7448 |
+| 0 | Deep Hedging | 0.0030 | 0.4514 | 0.2037 | 1.0376 | 2.7567 |
+| 10 | BS Delta | -0.2749 | 0.4498 | 0.2023 | 1.3569 | 2.7448 |
+| 10 | Deep Hedging | -0.2596 | 0.4686 | 0.2196 | 1.2431 | 2.5915 |
+| 25 | BS Delta | -0.6923 | 0.4936 | 0.2436 | 1.9136 | 2.7448 |
+| 25 | Deep Hedging | -0.6292 | 0.4843 | 0.2345 | 1.6455 | 2.4961 |
+| 50 | BS Delta | -1.3879 | 0.6054 | 0.3665 | 2.8759 | 2.7448 |
+| 50 | Deep Hedging | -1.2070 | 0.5073 | 0.2574 | 2.2754 | 2.3888 |
 
-Because the neural policy flattens the sharp delta jump near expiry to save on fees, it under-hedges sharp rallies (`+2.5%` to `+4.0%` horizons), which kept its cumulative 1x-index PnL underwater across the whole test window (`-$173` total, trough `-$192`). Black-Scholes stayed near breakeven and reached `+$53` before dropping on the late selloff (`-$162` total). With only ~3,000 historical 1-hour training bars, a calibrated Black-Scholes baseline remains tough to beat consistently out of sample.
+### Heston stochastic volatility sweep (`400` epochs, `lr = 0.003`)
 
-## Plots
+Under Heston (`C0 = 3.0186`), plug-in Black-Scholes leaves unhedged correlation/vega risk on the table even at `0 bps` (`Variance 0.4303` vs `0.4851`, `95% CVaR 1.5669` vs `1.6341`). Across `10–50 bps`, the neural policy improves both variance and 95% CVaR across all tested fee levels. On the `25 bps` run (`N = 100,000`), `95% VaR` improves from `-1.9486` to `-1.7716` and `99% CVaR` improves from `3.1601` to `2.8699`.
 
-### Cumulative equity curve
-![Full Equity Curve Comparison](plots/full_equity_curve_comparison.png)
+| Cost (bps) | Strategy | Mean PnL | Std Dev | Variance | 95% CVaR | Turnover (shares) |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| 0 | Plug-in BS | 0.0125 | 0.6965 | 0.4851 | 1.6341 | 2.7827 |
+| 0 | Deep Hedging | 0.0104 | 0.6560 | 0.4303 | 1.5669 | 2.7152 |
+| 10 | Plug-in BS | -0.2697 | 0.6951 | 0.4831 | 1.9303 | 2.7827 |
+| 10 | Deep Hedging | -0.2599 | 0.6623 | 0.4386 | 1.7848 | 2.6730 |
+| 25 | Plug-in BS | -0.6929 | 0.7079 | 0.5011 | 2.4136 | 2.7827 |
+| 25 | Deep Hedging | -0.6898 | 0.6455 | 0.4167 | 2.1875 | 2.7720 |
+| 50 | Plug-in BS | -1.3983 | 0.7663 | 0.5871 | 3.2990 | 2.7827 |
+| 50 | Deep Hedging | -1.3505 | 0.6149 | 0.3781 | 2.7933 | 2.6928 |
 
-Cumulative PnL scaled by each horizon's actual S&P 500 spot price (`$6,413–$7,796`). The policy stayed negative through the early rallies while Black-Scholes held up better until the late selloff at horizons 38–40.
+## Plots (Heston `25 bps` & friction sweep)
 
-### Terminal PnL and trajectories
-![PnL Trajectory Analysis](plots/pnl_trajectory_analysis.png)
+### Delta adjustment surface
+![Delta Difference Surface](plots/delta_diff_surface.png)
 
-Both strategies start at the opening trade fee (`~ -0.05`) with no artificial day-0 jump. The histogram shows Black-Scholes's tighter core distribution alongside its single `-1.75` outlier.
+Difference `Delta_Policy - Delta_BS` over normalized moneyness `S / K` and time to maturity `tau / T` (with `prev_delta = BS_Delta` on Heston `25 bps`). Above strike the policy carries a lower skew-adjusted delta, while just below ATM near expiry it avoids costly liquidation churn.
 
-### Delta surface
+### Hedging policy vs Black-Scholes surface
 ![Hedging Surface 3D](plots/hedging_surface_3d.png)
 
-The learned policy follows the Black-Scholes delta shape closely while smoothing out the steep transition near expiry to avoid fee churn.
+3D wireframe comparison of the learned hedging delta surface (blue) against the plug-in Black-Scholes surface (gray).
 
-### Training and validation loss
-![Training Losses](plots/training_losses_curve.png)
+### Terminal PnL density and tail risk (`N = 100,000`)
+![PnL Tail Distribution](plots/pnl_tail_distribution.png)
 
-Training loss keeps falling over 2,000 epochs while validation loss bottoms out around epoch 110, showing why validation checkpointing is needed on limited historical data.
+Out-of-sample terminal PnL density on `100,000` Heston paths at `25 bps`. Dashed vertical markers show left-tail 95% CVaR (`-2.19` for Deep Hedging vs `-2.41` for plug-in Black-Scholes).
+
+### Friction frontier (`0 / 10 / 25 / 50 bps`)
+![Friction Frontier](plots/friction_frontier.png)
+
+95% CVaR loss (left) and mean share turnover (right) across proportional cost levels for both GBM and Heston.
+
+### Heston implied volatility surface
+![Heston Implied Volatility Surface](plots/heston_iv_surface.png)
+
+Semi-analytical Black-Scholes implied volatility surface implied by our Heston parameters (`S0 = 100`, `r = 0.05`, `v0 = theta = 0.04`, `kappa = 2.0`, `xi = 0.50`, `rho = -0.70`), evaluated via the Little Heston Trap Lewis integral (`30`-day ATM call price `3.0057` vs GPU Monte Carlo `3.0186`, range `14.57%–27.77%`).
+

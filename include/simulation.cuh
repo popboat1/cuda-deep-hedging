@@ -3,27 +3,49 @@
 
 #include "cuda_utils.cuh"
 
-// struct for CUDA kernel params
-struct SimulationParams {
-    int num_paths;     // sim nums e.g., 1,000,000
-    int num_steps;     // how long? e.g., 30 days
-    float S0;          // initial stock price
-    float r;           // risk-free rate
-    float sigma;       // volatility
-    float T;           // time to expiry (years)
-    float dt;          // T / num_steps
-    float K;           // strike price e.g., 100.0
-    float cost_ratio;  // transaction fee rate e.g., 0.001f (10 bps)
-    float option_price;// simulated/black-scholes option price
+enum class MarketModel {
+    GBM = 0,
+    Heston = 1
 };
 
-// host interface that wraps around kernel launch in simulation.cu
-void generate_gbm_paths( 
-    float* d_paths,                    // pre-allocated device buffer [num_paths x num_steps]
+// parameters for GPU path generation and option pricing
+struct SimulationParams {
+    int num_paths = 0;
+    int num_steps = 30;
+    float S0 = 100.0f;
+    float K = 100.0f;
+    float r = 0.05f;
+    float sigma = 0.20f;
+    float T = 30.0f / 252.0f;
+    float dt = (30.0f / 252.0f) / 29.0f;
+    float cost_ratio = 0.0010f;
+    float option_price = 0.0f;
+    MarketModel model = MarketModel::GBM;
+
+    // heston stochastic variance parameters
+    float v0 = 0.04f;
+    float theta = 0.04f;
+    float kappa = 2.0f;
+    float xi = 0.50f;
+    float rho = -0.70f;
+    int heston_substeps = 8;
+};
+
+// generate simulated paths, instantaneous volatilities, payoffs, and benchmark BS deltas
+void generate_market_paths(
+    float* d_paths,
+    float* d_vols,
     float* d_payoffs,
     float* d_deltas,
     const SimulationParams& params,
     unsigned long long seed = 1234ULL
+);
+
+// estimate risk-neutral discounted call price via independent Monte Carlo draw
+float estimate_mc_option_price(
+    const SimulationParams& params,
+    int calibration_paths = 200000,
+    unsigned long long seed = 987654321ULL
 );
 
 #endif

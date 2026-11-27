@@ -39,12 +39,14 @@ HedgingLossStats compute_hedging_loss_stats(
     float lambda_cvar = 0.25f,
     bool use_hybrid = true,
     HedgingLossType loss_type = HedgingLossType::MeanVarCvar,
-    float risk_aversion = 4.0f
+    float risk_aversion = 4.0f,
+    bool force_cvar_metric = false
 );
 
 // host wrapper
 void bptt_backward_pass(
     const float* d_paths,
+    const float* d_vols,
     const float* d_payoffs,
     const float* d_policy_deltas,
     const float* d_portfolio_values,

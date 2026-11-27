@@ -35,7 +35,8 @@ HedgingLossStats compute_hedging_loss_stats(
     float lambda_cvar,
     bool use_hybrid,
     HedgingLossType loss_type,
-    float risk_aversion
+    float risk_aversion,
+    bool force_cvar_metric
 ) {
     if (portfolio_values.empty()) {
         throw std::invalid_argument("portfolio_values cannot be empty");
@@ -60,10 +61,12 @@ HedgingLossStats compute_hedging_loss_stats(
     double mean_v = sum_v * inv_n;
 
     bool center_cvar_losses = (loss_type != HedgingLossType::MeanVarCvar);
+    bool need_cvar = (use_hybrid && lambda_cvar > 0.0f) || force_cvar_metric;
+    bool need_entropic = (loss_type == HedgingLossType::EntropicRisk);
+
     double sum_sq = 0.0;
-    std::vector<double> cvar_losses(n);
-    double min_l = std::numeric_limits<double>::max();
-    double max_l = std::numeric_limits<double>::lowest();
+    std::vector<float> cvar_losses;
+    if (need_cvar) cvar_losses.resize(n);
     double max_neg_gamma_v = std::numeric_limits<double>::lowest();
     double gamma = static_cast<double>(risk_aversion);
 
@@ -71,68 +74,84 @@ HedgingLossStats compute_hedging_loss_stats(
         double v_i = static_cast<double>(portfolio_values[i]);
         double v_tilde = v_i - mean_v;
         sum_sq += v_tilde * v_tilde;
-        double loss_i = center_cvar_losses ? (-v_tilde) : (-v_i);
-        cvar_losses[i] = loss_i;
-        min_l = std::min(min_l, loss_i);
-        max_l = std::max(max_l, loss_i);
-        max_neg_gamma_v = std::max(max_neg_gamma_v, -gamma * v_i);
+        if (need_cvar) {
+            cvar_losses[i] = static_cast<float>(center_cvar_losses ? (-v_tilde) : (-v_i));
+        }
+        if (need_entropic) {
+            max_neg_gamma_v = std::max(max_neg_gamma_v, -gamma * v_i);
+        }
     }
 
     HedgingLossStats stats;
     stats.variance = sum_sq * inv_n;
     stats.mean_v = static_cast<float>(mean_v);
 
-    // stable log-sum-exp for cash-invariant entropic risk
-    double sum_exp = 0.0;
-    for (float v : portfolio_values) {
-        sum_exp += std::exp(-gamma * static_cast<double>(v) - max_neg_gamma_v);
+    if (need_entropic) {
+        double sum_exp = 0.0;
+        for (float v : portfolio_values) {
+            sum_exp += std::exp(-gamma * static_cast<double>(v) - max_neg_gamma_v);
+        }
+        double log_sum_exp = max_neg_gamma_v + std::log(sum_exp);
+        stats.entropic_risk = (log_sum_exp + std::log(inv_n)) / gamma;
+        stats.log_normalizer = static_cast<float>(log_sum_exp);
     }
-    double log_sum_exp = max_neg_gamma_v + std::log(sum_exp);
-    stats.entropic_risk = (log_sum_exp + std::log(inv_n)) / gamma;
-    stats.log_normalizer = static_cast<float>(log_sum_exp);
 
-    if (use_hybrid && lambda_cvar > 0.0f) {
-        // solve F'(nu) = 0 via bisection for smooth C1 Rockafellar-Uryasev threshold
+    if (need_cvar) {
+        // bracket smooth RU threshold around empirical quantile to avoid wide global bisection
         double eps = static_cast<double>(cvar_eps);
+        double inv_eps = 1.0 / eps;
+        double half_eps = 0.5 * eps;
         double tail_prob = 1.0 - static_cast<double>(cvar_alpha);
-        double lo = min_l - eps - 1.0;
-        double hi = max_l + eps + 1.0;
+
+        std::vector<float> q_buf = cvar_losses;
+        size_t q_idx = (n > 1) ? std::min(n - 1, static_cast<size_t>(std::floor(static_cast<double>(n - 1) * static_cast<double>(cvar_alpha)))) : 0;
+        std::nth_element(q_buf.begin(), q_buf.begin() + q_idx, q_buf.end());
+        double q_est = static_cast<double>(q_buf[q_idx]);
+
+        double lo = q_est - eps;
+        double hi = q_est + eps;
 
         auto mean_smooth_exceedance = [&](double nu) {
             double s = 0.0;
-            for (double loss_i : cvar_losses) {
-                double u = (loss_i - nu + 0.5 * eps) / eps;
-                double p = std::min(1.0, std::max(0.0, u));
-                s += p;
+            for (float loss_f : cvar_losses) {
+                double u = (static_cast<double>(loss_f) - nu + half_eps) * inv_eps;
+                if (u >= 1.0) {
+                    s += 1.0;
+                } else if (u > 0.0) {
+                    s += u;
+                }
             }
             return s * inv_n;
         };
 
-        for (int iter = 0; iter < 50; ++iter) {
+        // expand bracket only if ties or discrete steps push root outside +/- eps
+        while (mean_smooth_exceedance(lo) < tail_prob) lo -= eps;
+        while (mean_smooth_exceedance(hi) > tail_prob) hi += eps;
+
+        for (int iter = 0; iter < 32; ++iter) {
             double mid = 0.5 * (lo + hi);
             if (mean_smooth_exceedance(mid) > tail_prob) {
                 lo = mid;
             } else {
                 hi = mid;
             }
+            if (hi - lo < 1e-7) break;
         }
 
         double nu_star = 0.5 * (lo + hi);
         double sum_psi = 0.0;
         double sum_phi_prime = 0.0;
 
-        for (double loss_i : cvar_losses) {
-            double z = loss_i - nu_star;
-            double u = z + 0.5 * eps;
-            double phi_prime = std::min(1.0, std::max(0.0, u / eps));
-            double psi = 0.0;
+        for (float loss_f : cvar_losses) {
+            double z = static_cast<double>(loss_f) - nu_star;
+            double u = z + half_eps;
             if (u >= eps) {
-                psi = z;
+                sum_psi += z;
+                sum_phi_prime += 1.0;
             } else if (u > 0.0) {
-                psi = (u * u) / (2.0 * eps);
+                sum_psi += (u * u) * (0.5 * inv_eps);
+                sum_phi_prime += u * inv_eps;
             }
-            sum_psi += psi;
-            sum_phi_prime += phi_prime;
         }
 
         stats.ru_cvar = nu_star + (sum_psi * inv_n) / tail_prob;
@@ -143,7 +162,7 @@ HedgingLossStats compute_hedging_loss_stats(
     if (loss_type == HedgingLossType::EntropicRisk) {
         stats.total_loss = stats.entropic_risk;
     } else {
-        stats.total_loss = stats.variance + (use_hybrid ? static_cast<double>(lambda_cvar) * stats.ru_cvar : 0.0);
+        stats.total_loss = stats.variance + ((use_hybrid && lambda_cvar > 0.0f) ? static_cast<double>(lambda_cvar) * stats.ru_cvar : 0.0);
     }
 
     return stats;
@@ -151,6 +170,7 @@ HedgingLossStats compute_hedging_loss_stats(
 
 __global__ void bptt_backward(
     const float* d_paths,
+    const float* d_vols,
     const float* d_payoffs,
     const float* d_policy_deltas,
     const float* d_portfolio_values,
@@ -164,7 +184,6 @@ __global__ void bptt_backward(
     int loss_type_int,
     float risk_aversion
 ){
-    // --- shared memory buffers for block grad accum
     __shared__ float s_gW1[hidden_dim * input_dim];
     __shared__ float s_gb1[hidden_dim];
     __shared__ float s_gW2[hidden_dim * hidden_dim];
@@ -174,7 +193,6 @@ __global__ void bptt_backward(
 
     int tid = threadIdx.x;
 
-    // zero-out shared memory across the block
     for (int i = tid; i < hidden_dim * input_dim; i += blockDim.x) s_gW1[i] = 0.0f;
     for (int i = tid; i < hidden_dim; i += blockDim.x) s_gb1[i] = 0.0f;
     for (int i = tid; i < hidden_dim * hidden_dim; i += blockDim.x) s_gW2[i] = 0.0f;
@@ -192,13 +210,11 @@ __global__ void bptt_backward(
     if (active) {
         float V_T = d_portfolio_values[path_idx];
         if (loss_type_int == static_cast<int>(HedgingLossType::EntropicRisk)) {
-            // cash-invariant entropic risk softmax gradient
             dL_dV_T = -expf(-risk_aversion * V_T - loss_stats.log_normalizer);
         } else {
             float v_tilde = V_T - loss_stats.mean_v;
             float n_paths = static_cast<float>(params.num_paths);
 
-            // centered variance gradient
             dL_dV_T = (2.0f / n_paths) * v_tilde;
 
             if (use_hybrid && lambda_cvar > 0.0f) {
@@ -209,7 +225,7 @@ __global__ void bptt_backward(
                 float phi_prime = fminf(1.0f, fmaxf(0.0f, u));
                 float tail_scale = lambda_cvar / (n_paths * (1.0f - cvar_alpha));
 
-                // uncentered RU-CVaR penalizes transaction fee bleed while remaining cash-invariant
+                // uncentered RU-CVaR penalizes transaction fee bleed while remaining invariant to option_price shifts
                 float cvar_term = is_mean_var_cvar ? phi_prime : (phi_prime - loss_stats.mean_phi_prime);
                 dL_dV_T -= tail_scale * cvar_term;
             }
@@ -217,6 +233,7 @@ __global__ void bptt_backward(
     }
 
     float exp_r_dt = expf(params.r * params.dt);
+    float accrual_to_T = 1.0f;
     float upstream_d_delta = 0.0f;
 
     // all lanes iterate uniformly so tail-warp shuffle reductions never diverge
@@ -232,14 +249,10 @@ __global__ void bptt_backward(
             int curr_idx = t * params.num_paths + path_idx;
             float S_t = d_paths[curr_idx];
             float delta_t = d_policy_deltas[curr_idx];
-
-            // --- fetch prev position & re-evaluate activations
             float prev_delta = (t > 0) ? d_policy_deltas[(t - 1) * params.num_paths + path_idx] : 0.0f;
 
-            // recompute normalized 5-feature state vector
-            compute_state_vector(d_paths, t, path_idx, prev_delta, params, x);
+            compute_state_vector(d_paths, d_vols, t, path_idx, prev_delta, params, x);
 
-            // recompute layer 1
             for (int i = 0; i < hidden_dim; ++i) {
                 float sum = c_b1[i];
                 for (int j = 0; j < input_dim; ++j) {
@@ -248,7 +261,6 @@ __global__ void bptt_backward(
                 h1[i] = fmaxf(0.0f, sum);
             }
 
-            // recompute layer 2
             for (int i = 0; i < hidden_dim; ++i) {
                 float sum = c_b2[i];
                 for (int j = 0; j < hidden_dim; ++j) {
@@ -257,10 +269,6 @@ __global__ void bptt_backward(
                 h2[i] = fmaxf(0.0f, sum);
             }
 
-            // --- compute portfolio derivative consistent with unified settlement
-            int steps_from_next_to_expiry = (params.num_steps - 2) - t;
-            float accrual_to_T = expf(params.r * static_cast<float>(steps_from_next_to_expiry) * params.dt);
-
             float sign_t = signf(delta_t - prev_delta);
             float dVT_ddelta = 0.0f;
 
@@ -268,7 +276,6 @@ __global__ void bptt_backward(
             float S_next = d_paths[next_idx];
 
             if (t == params.num_steps - 2) {
-                // last rebalance step settles into expiry liquidation
                 float sign_liq = signf(delta_t);
                 dVT_ddelta = -S_t * (1.0f + params.cost_ratio * sign_t) * exp_r_dt
                              + S_next * (1.0f - params.cost_ratio * sign_liq);
@@ -282,19 +289,14 @@ __global__ void bptt_backward(
                 dVT_ddelta = step_return * accrual_to_T;
             }
 
-            // chain rule for total delta gradient
             float dL_ddelta = (dL_dV_T * dVT_ddelta) + upstream_d_delta;
-
-            // backprop through sigmoid output layer
             d3 = dL_ddelta * (delta_t * (1.0f - delta_t));
 
-            // backprop through relu layer 2
             for (int i = 0; i < hidden_dim; ++i) {
                 float incoming = c_W3[i] * d3;
                 d2[i] = (h2[i] > 0.0f) ? incoming : 0.0f;
             }
 
-            // backprop through relu layer 1
             for (int i = 0; i < hidden_dim; ++i) {
                 float incoming = 0.0f;
                 for (int j = 0; j < hidden_dim; ++j) {
@@ -303,7 +305,6 @@ __global__ void bptt_backward(
                 d1[i] = (h1[i] > 0.0f) ? incoming : 0.0f;
             }
 
-            // upstream gradient for prev_delta passed to step t - 1
             upstream_d_delta = 0.0f;
             for (int i = 0; i < hidden_dim; ++i) {
                 upstream_d_delta += c_W1[i * input_dim + 1] * d1[i];
@@ -332,12 +333,13 @@ __global__ void bptt_backward(
                 }
             }
         }
+
+        // step backward one interval so accrual_to_T tracks exp(r * ((N - 2) - t) * dt)
+        accrual_to_T *= exp_r_dt;
     }
 
-    // sync block before writing to global memory
     __syncthreads();
 
-    // flush block shared memory gradients to global memory
     for (int i = tid; i < hidden_dim * input_dim; i += blockDim.x) atomicAdd(&grads.d_gW1[i], s_gW1[i]);
     for (int i = tid; i < hidden_dim; i += blockDim.x) atomicAdd(&grads.d_gb1[i], s_gb1[i]);
     for (int i = tid; i < hidden_dim * hidden_dim; i += blockDim.x) atomicAdd(&grads.d_gW2[i], s_gW2[i]);
@@ -348,6 +350,7 @@ __global__ void bptt_backward(
 
 void bptt_backward_pass(
     const float* d_paths,
+    const float* d_vols,
     const float* d_payoffs,
     const float* d_policy_deltas,
     const float* d_portfolio_values,
@@ -362,13 +365,12 @@ void bptt_backward_pass(
     HedgingLossType loss_type,
     float risk_aversion
 ){
-    copy_weights_to_constant(weights);
-
+    // weights are already resident in constant memory from forward_pass
     int threads = 256;
     int blocks = cuda_utils::ceil_div(params.num_paths, threads);
 
     bptt_backward<<<blocks, threads>>>(
-        d_paths, d_payoffs, d_policy_deltas, d_portfolio_values,
+        d_paths, d_vols, d_payoffs, d_policy_deltas, d_portfolio_values,
         grads, params, loss_stats, cvar_alpha, cvar_eps, lambda_cvar, use_hybrid,
         static_cast<int>(loss_type), risk_aversion
     );

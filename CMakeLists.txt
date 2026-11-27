@@ -15,7 +15,6 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 set(CORE_SOURCES
     src/autograd.cu
-    src/dataloader.cpp
     src/exporter.cu
     src/mlp.cu
     src/optimizer.cu
